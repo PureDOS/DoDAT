@@ -1,0 +1,3 @@
+echo Building \'DoDAT-`uname -m`\' ...
+clang -std=c++11 DoDAT.cpp -lstdc++ -Wall -o DoDAT-`uname -m`
+echo Done!

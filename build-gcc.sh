@@ -1,0 +1,3 @@
+echo Building \'DoDAT-`uname -m`\' ...
+gcc -std=c++11 DoDAT.cpp -lstdc++ -Wall -Wno-psabi -O3 -o DoDAT-`uname -m`
+echo Done!
