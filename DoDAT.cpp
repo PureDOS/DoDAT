@@ -2378,7 +2378,7 @@ int main(int argc, char *argv[])
 	while (xmlPathEnd != xmlPath && *xmlPathEnd != '/' && *xmlPathEnd != '\\') xmlPathEnd--;
 
 	std::string outBase;
-	((xmlPathEnd != xmlPath ? outBase.assign(xmlPath, (xmlPathEnd - xmlPath)) : outBase.assign(outPath ? outPath : ".")) += '/');
+	(((outPath || xmlPathEnd == xmlPath) ? outBase.assign(outPath ? outPath : ".") : outBase.assign(xmlPath, (xmlPathEnd - xmlPath))) += '/');
 
 	if (verifyMode || fixMode)
 	{
