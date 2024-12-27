@@ -24,8 +24,8 @@ using System.Xml;
 
 [assembly: System.Reflection.AssemblyTitle("DoDATGUI")]
 [assembly: System.Reflection.AssemblyProduct("DoDATGUI")]
-[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 class DoDATGUI : Form
