@@ -1363,7 +1363,7 @@ struct SFileIso : SFile
 				totalunits += (Bit32u)(bt->buf.size() / bt->data_size);
 				totalunits = (totalunits + (CD_TRACK_PADDING - 1)) / CD_TRACK_PADDING * CD_TRACK_PADDING;
 			}
-			Bit32u totalunmappedhunks = (totalunits + 7) / 8;
+			const Bit32u totalunmappedhunks = (totalunits + 7) / 8;
 
 			enum { UNITBYTES = CD_FRAME_SIZE, HUNKBYTES = UNITBYTES * 8 };
 			static const Bit8u zeroedHunkSha1[20] { 0x32, 0x6b, 0xf7, 0xa9, 0x91, 0x84, 0x0c, 0x66, 0x90, 0x49, 0x00, 0xcd, 0x96, 0x89, 0xf5, 0x89, 0xf4, 0x73, 0x10, 0xfa }; // sha1 of HUNKBYTES zero bytes
@@ -1431,7 +1431,7 @@ struct SFileIso : SFile
 
 			Bit8u *temphunk = (Bit8u*)malloc(HUNKBYTES), *hnk = temphunk;
 			Bit32u headhunks = (Bit32u)(((meta - rawheader) + (HUNKBYTES - 1)) / HUNKBYTES), hunkcounter = headhunks;
-			Bit8u* hunks = rawheader + hunkcounter * HUNKBYTES;
+			Bit8u* hunks = rawheader + headhunks * HUNKBYTES;
 			memset(meta, 0, (hunks - meta));
 
 			totalunits = 0;
@@ -1469,10 +1469,10 @@ struct SFileIso : SFile
 			if (hnk != temphunk)
 			{
 				memset(hnk, 0, temphunk + HUNKBYTES - hnk);
-				if (hnk <= temphunk + HUNKBYTES / 2 && (hunkcounter - headhunks) >= 256)
+				if (Bit32u garbagehunkidx = ((hnk <= temphunk + HUNKBYTES / 2 && totalunmappedhunks >= 256) ? get_bigendian_uint32(hunkmap - (256 * 4)) : 0))
 				{
 					// An unintended (but consistent) behavior of chdman can add garbage at the end of the final chunk from 256 hunks ago
-					memcpy(temphunk + HUNKBYTES / 2, hunks - (HUNKBYTES * 256) + (HUNKBYTES / 2), HUNKBYTES / 2);
+					memcpy(temphunk + HUNKBYTES / 2, rawheader + (garbagehunkidx * HUNKBYTES) + (HUNKBYTES / 2), HUNKBYTES / 2);
 				}
 				Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
 			}
