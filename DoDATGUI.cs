@@ -30,6 +30,8 @@ using System.Xml;
 
 class DoDATGUI : Form
 {
+    const string DoDatExeVersionString = "DoDAT v0.2";
+
     string OriginalText;
     private ComboBox cmbRunMode;
 
@@ -53,7 +55,7 @@ class DoDATGUI : Form
             testproc.StartInfo.UseShellExecute = false;
             testproc.StartInfo.CreateNoWindow = true;
             testproc.Start();
-            if (!testproc.StandardError.ReadToEnd().Contains("DoDAT v0.1")) throw new Exception("Encountered wrong version of DoDAT program.");
+            if (!testproc.StandardError.ReadToEnd().Contains(DoDatExeVersionString)) throw new Exception("Encountered wrong version of DoDAT program.");
         }
         catch (Exception e)
         {
