@@ -1469,7 +1469,7 @@ struct SFileIso : SFile
 			if (hnk != temphunk)
 			{
 				memset(hnk, 0, temphunk + HUNKBYTES - hnk);
-				if (Bit32u garbagehunkidx = ((hnk <= temphunk + HUNKBYTES / 2 && totalunmappedhunks >= 256) ? get_bigendian_uint32(hunkmap - (256 * 4)) : 0))
+				if (Bit32u garbagehunkidx = ((hnk <= temphunk + HUNKBYTES / 2 && totalunmappedhunks > 256) ? get_bigendian_uint32(hunkmap - (256 * 4)) : 0))
 				{
 					// An unintended (but consistent) behavior of chdman can add garbage at the end of the final chunk from 256 hunks ago
 					memcpy(temphunk + HUNKBYTES / 2, rawheader + (garbagehunkidx * HUNKBYTES) + (HUNKBYTES / 2), HUNKBYTES / 2);
