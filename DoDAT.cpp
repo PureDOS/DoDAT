@@ -2029,6 +2029,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		needRoms++;
 		if (size < 7) goto potentialMatch; // can auto generate
 		for (SFile* fil : files) if (fil->size == size) goto potentialMatch;
+		if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) goto potentialMatch; // known file
 		if (x == XML_ELEM_START && !testForCHD) { testForCHD = pEnd; testForCHDWithSize = size; goto potentialMatch; }
 		continue;
 		potentialMatch:
@@ -2068,6 +2069,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		r++; //make sure to increment r before continue
 		Bit64u size = atoi64(romSize);
 		if (size < 7 && (!useSrcDates || (!size && (romNameX[-1] == '/' || romNameX[-1] == '\\')))) { matches++; continue; } // can auto generate
+		if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) { matches++; continue; } // known file
 
 		SFile* romFile = NULL;
 		for (SFile* fi : files)
@@ -2152,6 +2154,22 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 				hextouint8(romSha1, genSha1, 20);
 				SFileMemory gen(size, (Bit32u)atoi64(romCrc, 0x10), genSha1);
 				if (!isFix) Log("    Generating [%s] of size %d...\n", romName, (int)size);
+				z.WriteFile(romName, false, (Bit32u)size, zdate, ztime, &gen);
+			}
+			else if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40))
+			{
+				SFileMemory gen(size);
+				static const Bit8u emptyDataBinComp[] = "\200\0\0\0\377\1\21\377\2\"\377\3\63\377\4D\377\5U\377\6f\377\0\7w\377\b\210\377\t\231\377\n\252\377\v\273\377\f\314\377\r\335\377\16\356\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377?\17\377\377_\377\1CD001\344\1\0 \0\0-o\377\25\260\6\0w\t>\20z \3\0\b\b\0\nO\377\327\n\22\217\377\23/\377\"\0\24wO\377\24\0\b/\377\b\0PQO\377\2`? \0\0\377\1\21\377\2\":0P\320\0\0\0\20!\1\17\377\377\17\377\377\17\377\377\17\377\377@\17\377\70\377W\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377p?c\f\224\377\r\244\377\16\265\377\17\306\377\4\17\377\377\17\377\377\17\377\377\7\377s\37\372\24\b\0\377\17\377\377\2\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377q\"?\377]8\3\b/\377\b\0PO\377\2`8\33\1\1\0!\20\b;\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\64";
+				const Bit8u *in = emptyDataBinComp;
+				for (Bit8u bits = 0, code = 0, *out = &gen.buf[0], *out_end = out + 43008; out != out_end; code <<= 1, bits--)
+				{
+					if (bits == 0) { code = *in++; bits = 8; }
+					if ((code & 0x80) != 0) { *out++ = *in++; continue; }
+					int RLE1 = *in++, RLE = (RLE1<<8|*in++), RLESize = ((RLE >> 12) == 0 ? (*in++ + 0x12) : (RLE >> 12) + 2), RLEOffset = ((RLE & 0xFFF) + 1);
+					while (RLESize > RLEOffset) { memcpy(out, out - RLEOffset, RLEOffset); out += RLEOffset; RLESize -= RLEOffset; RLEOffset <<= 1; }
+					memcpy(out, out - RLEOffset, RLESize); out += RLESize;
+				}
+				if (!isFix) Log("    Storing known file [%s] of size %d ...\n", romName, (int)size);
 				z.WriteFile(romName, false, (Bit32u)size, zdate, ztime, &gen);
 			}
 			else { ZIP_ASSERT(false); } // should not be possible
@@ -2258,7 +2276,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 				Log(", need %.*s)\n", (int)(romSha1X - romSha1), romSha1);
 			}
 		}
-		if (!matchSha1 && size >= 7) romUnfixable++;
+		if (!matchSha1 && size >= 7 && (size != 43008 || strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40))) romUnfixable++;
 	}
 	if (p != pGameInner && pGameEn) *pGameEn = p;
 
