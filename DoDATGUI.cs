@@ -24,13 +24,13 @@ using System.Xml;
 
 [assembly: System.Reflection.AssemblyTitle("DoDATGUI")]
 [assembly: System.Reflection.AssemblyProduct("DoDATGUI")]
-[assembly: System.Reflection.AssemblyVersion("0.3.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.4.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.4.0.0")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 class DoDATGUI : Form
 {
-    const string DoDatExeVersionString = "DoDAT v0.3";
+    const string DoDatExeVersionString = "DoDAT v0.4";
 
     string OriginalText;
     private ComboBox cmbRunMode;

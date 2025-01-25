@@ -2379,7 +2379,7 @@ int main(int argc, char *argv[])
 			"  -v         : Verify existing files in output file directory\n"
 			"  -f         : Fix meta data in existing files that fail verification\n"
 			"  -q         : Don't ask for pressing a key at the end\n"
-			"\n", "DoDAT", "0.3");
+			"\n", "DoDAT", "0.4");
 		return 1;
 	}
 
