@@ -489,6 +489,26 @@ struct SFileMemory : SFile
 	//virtual Bit64u Write(const Bit8u* data, Bit64u ln) { Bit64u i = pos+ln, j = (i > size ? size : i), k = (j - pos); memcpy(buf+pos, data, (size_t)k); pos += k; return k; }
 	virtual Bit64u Seek(Bit64s ofs, int origin = SEEK_SET) { switch (origin) { case SEEK_SET: default: pos = (Bit64u)ofs; break; case SEEK_CUR: pos += ofs; break; case SEEK_END: pos = size + ofs; break; } return (pos > size ? (pos = size) : pos); }
 
+	// Generate a file from Base64
+	SFileMemory(const char* base64, size_t len) : buf(len ? (Bit8u*)malloc((len + 3) / 4 * 3) : (Bit8u*)NULL), pos((Bit64u)-1)
+	{
+		static const Bit8u base64dec[256] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,62,0,0,0,63,52,53,54,55,56,57,58,59,60,61,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,0};
+		Bit8u* pOut = buf;
+		for (const Bit8u* pIn = (const Bit8u*)base64; len; len -= 4, pIn += 4)
+		{
+			*pOut = (base64dec[pIn[0]] << 2);
+			if (len == 1 || pIn[1] == '=') break;
+			*(pOut++) |= ((base64dec[pIn[1]] >> 4) & 0x3);
+			*pOut = (base64dec[pIn[1]] << 4);
+			if (len == 2 || pIn[2] == '=') break;
+			*(pOut++) |= (base64dec[pIn[2]] >> 2) & 0xf;
+			*pOut = (base64dec[pIn[2]] << 6);
+			if (len == 3 || pIn[3] == '=') break;
+			*(pOut++) |= (base64dec[pIn[3]]);
+		}
+		size = (size_t)(pOut - buf);
+	}
+
 	// Generate a file from CRC and SHA1 (up to 7 bytes)
 	SFileMemory(Bit64u _size, Bit32u crc, Bit8u sha1[20]) : buf(_size ? (Bit8u*)malloc((size_t)_size) : (Bit8u*)NULL), pos((Bit64u)-1)
 	{
@@ -2020,14 +2040,14 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	EXml x;
 	for (p = pGameInner; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x)) != NULL; p = pNext)
 	{
-		char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X;
-		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, NULL)) continue;
+		char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romData, *romDataX;
+		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "data", &romData, &romDataX, NULL)) continue;
 
 		const char *missField = (!romName ? "name" : !romSize ? "size" : !romCrc ? "crc" : (!romSha1 || (romSha1X - romSha1) != 40) ? "sha1" : NULL);
 		if (missField) { char ce = *pEnd; *pEnd = '\0'; if (!strstr(p, "status=\"nodump\"")) LogErr("<rom> element missing '%s' field!\n", missField); *pEnd = ce; haveSizeMatches = 0; break; }
 		Bit64u size = atoi64(romSize);
 		needRoms++;
-		if (size < 7) goto potentialMatch; // can auto generate
+		if (size < 7 || romData) goto potentialMatch; // can auto generate
 		for (SFile* fil : files) if (fil->size == size) goto potentialMatch;
 		if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) goto potentialMatch; // known file
 		if (x == XML_ELEM_START && !testForCHD) { testForCHD = pEnd; testForCHDWithSize = size; goto potentialMatch; }
@@ -2052,8 +2072,8 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	bool closeInfoSection = false;
 	for (r = 0, p = pGameInner; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x, &textStart, &textEnd)) != NULL; p = pNext)
 	{
-		char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romDate, *romDateX;
-		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "date", &romDate, &romDateX, NULL))
+		char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romData, *romDataX;
+		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "data", &romData, &romDataX, NULL))
 		{
 			char *linkType, *linkTypeX;
 			if (forceTry && !isFix && (XMLMatchTag(p, pEnd, "link", 4, "type", &linkType, &linkTypeX, NULL) || XMLMatchTag(p, pEnd, "comment", 7, NULL)))
@@ -2089,6 +2109,16 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 			}
 			romFile = fi;
 			break;
+		}
+
+		// If the XML has the file content encoded in Base64, use that
+		if (romData && romSha1 && (romFile = new SFileMemory(romData, (size_t)(romDataX - romData))) != NULL)
+		{
+			romFile->date = romFile->time = (Bit16u)-1;
+			gameFiles.push_back(romFile); // remember to delete during cleanup
+			Bit8u romSha1b[20];
+			if (romFile->size != size || !romFile->GetSHA1() || !hextouint8(romSha1, romSha1b, 20) || memcmp(romFile->sha1, romSha1b, 20)) romFile = NULL;
+			else romFile->path.assign("Embedded Data");
 		}
 
 		// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
@@ -2198,8 +2228,8 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 	char* p = pGameInner, *pEnd, *pNext;
 	for (EXml x; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x)) != NULL; p = pNext)
 	{
-		char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romDate, *romDateX;
-		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "date", &romDate, &romDateX, NULL)) continue;
+		char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romDate, *romDateX, *romData, *romDataX;
+		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "date", &romDate, &romDateX, "data", &romData, &romDataX, NULL)) continue;
 
 		const char *missField = (!romName ? "name" : !romSize ? "size" : !romCrc ? "crc" : (!romSha1 || (romSha1X - romSha1) != 40) ? "sha1" : NULL);
 		if (missField) { LogErr("<rom> element missing '%s' field!\n", missField); break; }
@@ -2276,7 +2306,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 				Log(", need %.*s)\n", (int)(romSha1X - romSha1), romSha1);
 			}
 		}
-		if (!matchSha1 && size >= 7 && (size != 43008 || strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40))) romUnfixable++;
+		if (!matchSha1 && size >= 7 && (size != 43008 || strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) && !romData) romUnfixable++;
 	}
 	if (p != pGameInner && pGameEn) *pGameEn = p;
 
