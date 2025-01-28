@@ -2519,7 +2519,7 @@ int main(int argc, char *argv[])
 	if (!noQuitConfirm) Log("Loading DAT XML from %s ...\n", (useStdin ? "<console input> (press CTRL+C to abort input)" : xmlPath));
 	FILE* fXML = (useStdin ? stdin : fopen(xmlPath, "rb"));
 	if (!fXML) { LogErr("Failed to open DAT XML %s\n\n", xmlPath); return 1; }
-	if (!useStdin) { fseek_wrap(fXML, 0, SEEK_END); xml.reserve((size_t)ftell_wrap(fXML)); fseek_wrap(fXML, 0, SEEK_SET); }
+	if (!useStdin) { fseek_wrap(fXML, 0, SEEK_END); xml.reserve((size_t)ftell_wrap(fXML) + 1); fseek_wrap(fXML, 0, SEEK_SET); }
 
 	char xmlreadbuf[2048];
 	for (int rootTagOfs = 0, rootTagLen = 0, got = 0, ofs = 0;;)
@@ -2549,7 +2549,7 @@ int main(int argc, char *argv[])
 			while (pTag[rootTagLen+1] != '>' && pTag[rootTagLen+1] != ' ') rootTagLen++;
 		}
 		else if (!memcmp(pXml + xml.size() - 1 - (got - ofs) - rootTagLen, pXml + rootTagOfs, rootTagLen) && XMLLevel(pXml + rootTagOfs))
-			{ xml.resize(xml.size() - (got - ofs) + 1); xml.back() = '\0'; break; }
+			{ xml.resize(xml.size() - (got - ofs) + 1); xml.back() = '\0'; break; } // force null terminate
 	}
 	fclose(fXML);
 
@@ -2627,6 +2627,7 @@ int main(int argc, char *argv[])
 				onlyOneGame = !strstr(pGameEn, "<game ") && !strstr(pGameEn, "<machine ");
 			}
 			BuildRom(pGameEn, gameName, gameNameX, outBase, files, false, onlyOneGame, bUseSrcDates, bLogPartialMatch, &pGameEn);
+			if (pGameEn[0] != '<' || pGameEn[1] != '/' || pGameEn[2] != pGame[1] || pGameEn[3] != pGame[2]) { LogErr("Invalid XML near\n----------------------------\n%.*s\n----------------------------\n%.*s\n----------------------------\n", 200, pGame, 200, pGameEn); break; }
 		}
 
 		for (size_t i = files.size(); i--;) delete files[i];
