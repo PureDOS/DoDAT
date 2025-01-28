@@ -579,7 +579,7 @@ struct SFileMemory : SFile
 			{
 				Bit64u sourceLen, targetLen, metaLen, cmd, len, ofs = 0, inpRelOfs = 0, outpRelOfs = 0;
 				patch.Seek(4); // skip over header
-				if (!BPSGetVarLenInt(patch, sourceLen) || sourceLen != (inpEnd - inp) || !BPSGetVarLenInt(patch, targetLen) || targetLen != (outpEnd - outp) || !BPSGetVarLenInt(patch, metaLen)) return false;
+				if (!BPSGetVarLenInt(patch, sourceLen) || sourceLen != (Bit64u)(inpEnd - inp) || !BPSGetVarLenInt(patch, targetLen) || targetLen != (Bit64u)(outpEnd - outp) || !BPSGetVarLenInt(patch, metaLen)) return false;
 				patch.Seek(metaLen, SEEK_CUR); // skip over meta data
 				for (;;)
 				{
@@ -2166,7 +2166,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) goto potentialMatch; // known file
 		if (x == XML_ELEM_START && !testForCHD)
 		{
-			while (*pEnd && *pEnd != '<') pEnd++; if (!*pEnd) break; // skip whitespace to first child tag
+			while (*pEnd && *pEnd != '<') { pEnd++; } if (!*pEnd) break; // skip whitespace to first child tag
 			if (pEnd[1] == 't') { testForCHD = pEnd; testForCHDWithSize = size; goto potentialMatch; } // <track> tag
 			if (pEnd[1] == 'p' && needRoms == haveSizeMatches + 1) // <patch> tag
 			{
