@@ -95,7 +95,7 @@ class DoDATGUI : Form
         {
             try
             {
-                if (f.txtDAT.Text.Length == 0 || !File.Exists(f.txtDAT.Text)) throw new Exception();
+                if (f.txtDAT.Text.Length == 0 || !File.Exists(f.txtDAT.Text)) throw new Exception("");
                 object[] itms = new object[1024];
                 int n = 1;
                 using (XmlReader reader = XmlReader.Create(File.OpenRead(f.txtDAT.Text), new XmlReaderSettings { XmlResolver = null, DtdProcessing = DtdProcessing.Ignore }))
@@ -113,7 +113,7 @@ class DoDATGUI : Form
                 f.cmbGame.Items.AddRange(itms);
                 f.cmbGame.SelectedIndex = 0;
                 DATDir = new FileInfo(f.txtDAT.Text).DirectoryName;
-            } catch { f.cmbGame.Items.Clear(); f.cmbGame.Text = ""; DATDir = ""; }
+            } catch (Exception ex) { if (ex.Message != "") MessageBox.Show("Error Reading DAT file: " + ex.Message, "DoDAT - Error", MessageBoxButtons.OK, MessageBoxIcon.Error); f.cmbGame.Items.Clear(); f.cmbGame.Text = ""; DATDir = ""; }
             refresh();
         };
         f.cmbGame.Validated +=  (object sender, EventArgs e) => { if (f.cmbGame.Items.Count > 0 && f.cmbGame.SelectedIndex == -1) f.cmbGame.SelectedIndex = 0; };
