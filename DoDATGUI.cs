@@ -24,13 +24,13 @@ using System.Xml;
 
 [assembly: System.Reflection.AssemblyTitle("DoDATGUI")]
 [assembly: System.Reflection.AssemblyProduct("DoDATGUI")]
-[assembly: System.Reflection.AssemblyVersion("0.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.5.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.5.0.0")]
 [assembly: System.Runtime.InteropServices.ComVisible(false)]
 
 class DoDATGUI : Form
 {
-    const string DoDatExeVersionString = "DoDAT v0.4";
+    const string DoDatExeVersionString = "DoDAT v0.5";
 
     string OriginalText;
 
