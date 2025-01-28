@@ -480,7 +480,7 @@ struct SFileRaw : SFile
 struct SFileMemory : SFile
 {
 	Bit8u* buf; Bit64u pos;
-	inline SFileMemory(Bit64u _size) : buf(_size ? (Bit8u*)malloc((size_t)_size) : (Bit8u*)NULL), pos((Bit64u)-1) { typ = T_MEMORY; size = _size; }
+	inline SFileMemory(Bit64u _size) : buf(_size ? (Bit8u*)malloc((size_t)_size) : (Bit8u*)NULL), pos((Bit64u)-1) { typ = T_MEMORY; size = _size; date = time = (Bit16u)-1; }
 	virtual inline ~SFileMemory() { free(buf); }
 	virtual bool Open() { ZIP_ASSERT(pos == (Bit64u)-1 && size); pos = 0; return true; }
 	virtual bool IsOpen() { return (pos != (Bit64u)-1); }
@@ -525,6 +525,120 @@ struct SFileMemory : SFile
 			SHA1_CTX::Run(test, (size_t)_size, compSha1);
 			if (sha1[0] == compSha1[0] && !memcmp(sha1, compSha1, sizeof(compSha1))) { memcpy(buf, test, (size_t)_size); return; } // found
 		}
+	}
+
+	// Read entire input file into buf
+	SFileMemory(SFile& fiLoad) : SFileMemory(fiLoad.size)
+	{
+		bool wasOpen = fiLoad.IsOpen();
+		if (wasOpen) fiLoad.Seek(0); else fiLoad.Open();
+		fiLoad.Read(buf, size);
+		if (!wasOpen) fiLoad.Close();
+	}
+
+	// Patch a file with a IPS or BPS patch encoded as Base64 in the DAT XML
+	static SFileMemory* BuildPatched(const std::vector<SFile*>& files, char* pRomOpenTagEnd, Bit64u romSize, const char* romSha1)
+	{
+		struct Local
+		{
+			static bool GetU24(SFile& fi, Bit32u& res)
+			{
+				Bit8u buf[3]; if (fi.Read(buf, 3) == 3) { res = (Bit32u)((buf[0] << 16) | (buf[1] << 8) | buf[2]); return true; } else { return false; }
+			}
+			static bool GetU16(SFile& fi, Bit16u& res)
+			{
+				Bit8u buf[2]; if (fi.Read(buf, 2) == 2) { res = (Bit16u)((buf[0] << 8) | buf[1]); return true; } else { return false; }
+			}
+			static bool GetU8(SFile& fi, Bit8u& res)
+			{
+				Bit8u buf; if (fi.Read(&buf, 1) == 1) { res = buf; return true; } else { return false; }
+			}
+			static bool BPSGetVarLenInt(SFile& fi, Bit64u& res)
+			{
+				Bit8u x; Bit64u shift = 1; for (res = 0;;) { if (!fi.Read(&x, 1)) return false; res += (x & 0x7f) * shift; if (x & 0x80) return true; res += (shift <<= 7); }
+			}
+
+			static bool IPSPatch(SFileMemory& patch, const Bit8u* inp, const Bit8u* inpEnd, Bit8u* outp, const Bit8u* outpEnd)
+			{
+				Bit32u ofs; Bit16u len, rlelen; Bit8u rlebyte;
+				if ((outpEnd - outp) <= (inpEnd - inp)) { memcpy(outp, inp, (outpEnd - outp)); }
+				else { memcpy(outp, inp, (inpEnd - inp)); memset(outp + (inpEnd - inp), 0, (outpEnd - outp) - (inpEnd - inp)); }
+				patch.Seek(5); // skip over header
+				while (GetU24(patch, ofs))
+				{
+					if (ofs == 0x454f46) return true; // EOF marker (followed by trunc which we don't use)
+					if (!GetU16(patch, len) || outp + ofs + len > outpEnd) return false;
+					if (len) patch.Read(outp + ofs, len); // patch bytes
+					else if (!GetU16(patch, rlelen) || !GetU8(patch, rlebyte) || outp + ofs + rlelen > outpEnd) return false;
+					else memset(outp + ofs, rlebyte, rlelen); // RLE
+				}
+				return true; // no EOF marker but still success?
+			}
+
+			static bool BPSPatch(SFileMemory& patch, const Bit8u* inp, const Bit8u* inpEnd, Bit8u* outp, const Bit8u* outpEnd)
+			{
+				Bit64u sourceLen, targetLen, metaLen, cmd, len, ofs = 0, inpRelOfs = 0, outpRelOfs = 0;
+				patch.Seek(4); // skip over header
+				if (!BPSGetVarLenInt(patch, sourceLen) || sourceLen != (inpEnd - inp) || !BPSGetVarLenInt(patch, targetLen) || targetLen != (outpEnd - outp) || !BPSGetVarLenInt(patch, metaLen)) return false;
+				patch.Seek(metaLen, SEEK_CUR); // skip over meta data
+				for (;;)
+				{
+					if (!BPSGetVarLenInt(patch, cmd) || ofs + (len = ((cmd >> 2) + 1)) > targetLen) return false;
+					switch (cmd & 3)
+					{
+						case 0: // SourceRead
+							if (ofs + len > sourceLen) return false;
+							memcpy(&outp[ofs], &inp[ofs], (size_t)len);
+							break;
+						case 1: // TargetRead
+							if (patch.Read(&outp[ofs], len) != len) return false;
+							break;
+						case 2: // SourceCopy
+							if (!BPSGetVarLenInt(patch, cmd) || (inpRelOfs += (Bit64s)(cmd >> 1) * ((cmd & 1) ? -1 : 1)) + len > sourceLen) return false;
+							memcpy(&outp[ofs], &inp[inpRelOfs], (size_t)len);
+							inpRelOfs += len;
+							break;
+						case 3: // TargetCopy
+							if (!BPSGetVarLenInt(patch, cmd) || (outpRelOfs += (Bit64s)(cmd >> 1) * ((cmd & 1) ? -1 : 1)) >= ofs) return false;
+							for (Bit8u *p = &outp[ofs], *pEnd = p + len; p != pEnd;) *(p++) = outp[outpRelOfs++];
+							break;
+					}
+					if ((ofs += len) == targetLen) return true;
+				}
+			}
+		};
+
+		EXml x;
+		for (char *p = pRomOpenTagEnd, *pEnd = p; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END; p = pEnd = XMLLevel(pEnd, x))
+		{
+			char *patchData, *patchDataX, *patchSize, *patchSizeX, *patchCrc, *patchCrcX, *patchSha1, *patchSha1X;
+			if (!XMLMatchTag(p, pEnd, "patch", 5, "data", &patchData, &patchDataX, "size", &patchSize, &patchSizeX, "crc", &patchCrc, &patchCrcX, "sha1", &patchSha1, &patchSha1X, NULL)) continue;
+
+			Bit64u size = atoi64(patchSize);
+			for (SFile* fi : files)
+			{
+				if (fi->size != size || fi->GetCRC32() != (Bit32u)atoi64(patchCrc, 0x10)) continue;
+				Bit8u patchSha1b[20];
+				if (!fi->GetSHA1() || !hextouint8(patchSha1, patchSha1b, 20) || memcmp(fi->sha1, patchSha1b, 20)) continue;
+
+				SFileMemory unpatched(*fi), patched(romSize), patch(patchData, (size_t)(patchDataX - patchData));
+				patch.Open();
+
+				Bit32u hdr = 0;
+				Local::GetU24(patch, hdr);
+				bool success = false;
+				if (hdr == 0x504154) success = Local::IPSPatch(patch, unpatched.buf, unpatched.buf + unpatched.size, patched.buf, patched.buf + patched.size); // IPS file
+				if (hdr == 0x425053) success = Local::BPSPatch(patch, unpatched.buf, unpatched.buf + unpatched.size, patched.buf, patched.buf + patched.size); // BPS file
+
+				SFileMemory* res = NULL;
+				Bit8u romSha1b[20];
+				bool match = (success && patched.GetSHA1() && hextouint8(romSha1, romSha1b, 20) && !memcmp(patched.sha1, romSha1b, 20));
+				if (match) { res = new SFileMemory(0); res->buf = patched.buf; res->size = patched.size; patched.buf = NULL; res->path.assign(fi->path).append("|PATCHED"); }
+				else LogErr("Patch of type %s for rom with Sha1 %.*s failed (%s)\n", (hdr == 0x504154 ? "IPS" : hdr == 0x425053 ? "BPS" : "Unknown"), 40, romSha1, (success ? "Patched file did not match" : "Patch format error"));
+				return res;
+			}
+		}
+		return NULL;
 	}
 };
 
@@ -1540,19 +1654,6 @@ struct SFileIso : SFile
 			return false;
 		}
 
-		static SFile* BuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize, const char* chdRomSha1)
-		{
-			std::vector<BuiltTrack*> builtTracks;
-			SFile* builtFile = NULL;
-			TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, chdRomSha1, &builtTracks, &builtFile);
-			return builtFile;
-		}
-
-		static bool CanPotentiallyBuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize)
-		{
-			return TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, NULL, NULL, NULL);
-		}
-
 		#pragma pack(1)
 		struct isoDirEntry {
 			Bit8u length, extAttrLength;
@@ -1627,6 +1728,19 @@ struct SFileIso : SFile
 			}
 		}
 	};
+
+	static SFile* BuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize, const char* chdRomSha1)
+	{
+		std::vector<IsoReader::BuiltTrack*> builtTracks;
+		SFile* builtFile = NULL;
+		IsoReader::TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, chdRomSha1, &builtTracks, &builtFile);
+		return builtFile;
+	}
+
+	static bool CanPotentiallyBuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize)
+	{
+		return IsoReader::TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, NULL, NULL, NULL);
+	}
 
 	static bool IndexFiles(SFile& fi, std::vector<SFile*>& files)
 	{
@@ -2044,13 +2158,30 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "data", &romData, &romDataX, NULL)) continue;
 
 		const char *missField = (!romName ? "name" : !romSize ? "size" : !romCrc ? "crc" : (!romSha1 || (romSha1X - romSha1) != 40) ? "sha1" : NULL);
-		if (missField) { char ce = *pEnd; *pEnd = '\0'; if (!strstr(p, "status=\"nodump\"")) LogErr("<rom> element missing '%s' field!\n", missField); *pEnd = ce; haveSizeMatches = 0; break; }
+		if (missField) { char ce = *pEnd; *pEnd = '\0'; if (!strstr(p, "status=\"nodump\"")) LogErr("<%s> element missing '%s' field!\n", "rom", missField); *pEnd = ce; haveSizeMatches = 0; break; }
 		Bit64u size = atoi64(romSize);
 		needRoms++;
 		if (size < 7 || romData) goto potentialMatch; // can auto generate
 		for (SFile* fil : files) if (fil->size == size) goto potentialMatch;
 		if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) goto potentialMatch; // known file
-		if (x == XML_ELEM_START && !testForCHD) { testForCHD = pEnd; testForCHDWithSize = size; goto potentialMatch; }
+		if (x == XML_ELEM_START && !testForCHD)
+		{
+			while (*pEnd && *pEnd != '<') pEnd++; if (!*pEnd) break; // skip whitespace to first child tag
+			if (pEnd[1] == 't') { testForCHD = pEnd; testForCHDWithSize = size; goto potentialMatch; } // <track> tag
+			if (pEnd[1] == 'p' && needRoms == haveSizeMatches + 1) // <patch> tag
+			{
+				char *pNextPatch, *patchData, *patchDataX, *patchSize, *patchSizeX, *patchCrc, *patchCrcX, *patchSha1, *patchSha1X;
+				for (p = pEnd; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNextPatch = XMLLevel(pEnd, x)) != NULL; p = pNextPatch)
+				{
+					if (!XMLMatchTag(p, pEnd, "patch", 5, "data", &patchData, &patchDataX, "size", &patchSize, &patchSizeX, "crc", &patchCrc, &patchCrcX, "sha1", &patchSha1, &patchSha1X, NULL)) continue;
+
+					missField = (!patchData ? "data" : !patchSize ? "size" : !patchCrc ? "crc" : (!patchSha1 || (patchSha1X - patchSha1) != 40) ? "sha1" : NULL);
+					if (missField) { LogErr("<%s> element missing '%s' field!\n", "patch", missField); break; }
+					size = atoi64(patchSize);
+					for (SFile* fil : files) if (fil->size == size) goto potentialMatch;
+				}
+			}
+		}
 		continue;
 		potentialMatch:
 		haveSizeMatches++;
@@ -2059,7 +2190,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	if (!forceTry)
 	{
 		if (!needRoms || haveSizeMatches < (1 + needRoms * 2 / 3)) return false;
-		if (testForCHD && !SFileIso::IsoReader::CanPotentiallyBuildCHD(files, testForCHD, testForCHDWithSize)) return false;
+		if (testForCHD && !SFileIso::CanPotentiallyBuildCHD(files, testForCHD, testForCHDWithSize)) return false;
 	}
 
 	XMLInlineStringConvert(gameName, gameNameX);
@@ -2114,7 +2245,6 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		// If the XML has the file content encoded in Base64, use that
 		if (romData && romSha1 && (romFile = new SFileMemory(romData, (size_t)(romDataX - romData))) != NULL)
 		{
-			romFile->date = romFile->time = (Bit16u)-1;
 			gameFiles.push_back(romFile); // remember to delete during cleanup
 			Bit8u romSha1b[20];
 			if (romFile->size != size || !romFile->GetSHA1() || !hextouint8(romSha1, romSha1b, 20) || memcmp(romFile->sha1, romSha1b, 20)) romFile = NULL;
@@ -2122,11 +2252,12 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		}
 
 		// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
-		if (!romFile && x == XML_ELEM_START && matches == r - 1 && (romFile = SFileIso::IsoReader::BuildCHD(files, pEnd, size, romSha1)) != NULL)
-		{
-			romFile->date = romFile->time = (Bit16u)-1;
+		if (!romFile && x == XML_ELEM_START && matches == r - 1 && (romFile = SFileIso::BuildCHD(files, pEnd, size, romSha1)) != NULL)
 			gameFiles.push_back(romFile); // remember to delete during cleanup
-		}
+
+		// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
+		if (!romFile && x == XML_ELEM_START && matches == r - 1 && (romFile = SFileMemory::BuildPatched(files, pEnd, size, romSha1)) != NULL)
+			gameFiles.push_back(romFile); // remember to delete during cleanup
 
 		if (romFile || size < 7) { gameFiles[r-1] = romFile; matches++; continue; } // can auto generate size < 7
 		XMLInlineStringConvert(romName, romNameX);
@@ -2232,7 +2363,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 		if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "date", &romDate, &romDateX, "data", &romData, &romDataX, NULL)) continue;
 
 		const char *missField = (!romName ? "name" : !romSize ? "size" : !romCrc ? "crc" : (!romSha1 || (romSha1X - romSha1) != 40) ? "sha1" : NULL);
-		if (missField) { LogErr("<rom> element missing '%s' field!\n", missField); break; }
+		if (missField) { LogErr("<%s> element missing '%s' field!\n", "rom", missField); break; }
 
 		SFile* matchFile = NULL;
 		bool matchDate = false, matchTime = false, matchSize = false, matchCrc32 = false, matchSha1 = false, matchName = false;
