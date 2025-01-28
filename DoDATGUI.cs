@@ -33,7 +33,6 @@ class DoDATGUI : Form
     const string DoDatExeVersionString = "DoDAT v0.4";
 
     string OriginalText;
-    private ComboBox cmbRunMode;
 
     DoDATGUI()
     {
@@ -68,7 +67,7 @@ class DoDATGUI : Form
 
         Action refresh = () =>
         {
-            bool on = (f.cmbGame.Items.Count > 0), isfix = (f.cmbRunMode.SelectedIndex == 2), verifyOrFix = (isfix || f.cmbRunMode.SelectedIndex == 1);
+            bool on = (f.cmbGame.Items.Count > 0), verifyOrFix = (f.cmbRunMode.SelectedIndex > 0);
             f.txtInput.Enabled = f.btnInput.Enabled = (on && !verifyOrFix);
             f.txtOutput.Enabled = f.btnOutput.Enabled = on;
             f.cmbGame.Enabled = on;
@@ -165,8 +164,9 @@ class DoDATGUI : Form
             process.ErrorDataReceived  += (sendingProcess, errLine) => { m.WaitOne(); logs.Add(errLine.Data); m.ReleaseMutex(); };
 
             process.StartInfo.Arguments = "-q -s \"" + f.txtInput.Text + "\" -o \"" + f.txtOutput.Text + "\"";
-            if (f.cmbRunMode.SelectedIndex == 2) process.StartInfo.Arguments += " -f";
-            if (f.cmbRunMode.SelectedIndex == 1) process.StartInfo.Arguments += " -v";
+            if (f.cmbRunMode.SelectedIndex == 3 || f.cmbRunMode.SelectedIndex == 4) process.StartInfo.Arguments += " -f";
+            if (f.cmbRunMode.SelectedIndex == 1 || f.cmbRunMode.SelectedIndex == 2) process.StartInfo.Arguments += " -v";
+            if (f.cmbRunMode.SelectedIndex == 1 || f.cmbRunMode.SelectedIndex == 3) process.StartInfo.Arguments += " -c";
 
             f.progress.Visible = true;
             if (f.cmbGame.SelectedIndex == 0)
@@ -209,14 +209,15 @@ class DoDATGUI : Form
         f.ShowDialog();
     }
 
-    public TextBox txtDAT;
-    public Button btnDAT;
+    private TextBox txtDAT;
+    private Button btnDAT;
     private Label label1;
-    public Button btnInput;
-    public TextBox txtInput;
+    private Button btnInput;
+    private ComboBox cmbRunMode;
+    private TextBox txtInput;
     private Label label2;
-    public Button btnOutput;
-    public TextBox txtOutput;
+    private Button btnOutput;
+    private TextBox txtOutput;
     private Label label3;
     private GroupBox groupBox1;
     private Label label4;
@@ -415,9 +416,9 @@ class DoDATGUI : Form
             // btnRun
             // 
             this.btnRun.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnRun.Location = new System.Drawing.Point(404, 125);
+            this.btnRun.Location = new System.Drawing.Point(382, 125);
             this.btnRun.Name = "btnRun";
-            this.btnRun.Size = new System.Drawing.Size(110, 23);
+            this.btnRun.Size = new System.Drawing.Size(132, 23);
             this.btnRun.TabIndex = 12;
             this.btnRun.Text = "Run";
             this.btnRun.UseVisualStyleBackColor = true;
@@ -428,7 +429,7 @@ class DoDATGUI : Form
             | System.Windows.Forms.AnchorStyles.Right)));
             this.progress.Location = new System.Drawing.Point(15, 126);
             this.progress.Name = "progress";
-            this.progress.Size = new System.Drawing.Size(383, 21);
+            this.progress.Size = new System.Drawing.Size(361, 21);
             this.progress.Style = System.Windows.Forms.ProgressBarStyle.Marquee;
             this.progress.TabIndex = 11;
             this.progress.Visible = false;
@@ -441,11 +442,13 @@ class DoDATGUI : Form
             this.cmbRunMode.ItemHeight = 13;
             this.cmbRunMode.Items.AddRange(new object[] {
             "Build Game(s)",
-            "Verify Game(s)",
-            "Fix Game(s)"});
-            this.cmbRunMode.Location = new System.Drawing.Point(405, 126);
+            "Quick Verify Game(s)",
+            "Full Verify Game(s)",
+            "Quick Fix Game(s)",
+            "Full Fix Game(s)"});
+            this.cmbRunMode.Location = new System.Drawing.Point(383, 126);
             this.cmbRunMode.Name = "cmbRunMode";
-            this.cmbRunMode.Size = new System.Drawing.Size(126, 21);
+            this.cmbRunMode.Size = new System.Drawing.Size(148, 21);
             this.cmbRunMode.TabIndex = 13;
             // 
             // DoDATGUI

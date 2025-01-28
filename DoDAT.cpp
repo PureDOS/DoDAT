@@ -2345,7 +2345,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	return res;
 }
 
-static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, std::vector<SFile *>& workFiles, bool fixMode = false, char** pGameEn = NULL)
+static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, std::vector<SFile *>& workFiles, bool fixMode = false, bool crcOnlyCheck = false, char** pGameEn = NULL)
 {
 	XMLInlineStringConvert(gameName, gameNameX);
 	workPath.assign(outBase).append(gameName, gameNameX - gameName);
@@ -2392,7 +2392,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 			matchTime = (ztime == fi->time);
 			if ((matchSize = (size == fi->size)) == false) break;
 			if ((matchCrc32 = (fi->GetCRC32() == (Bit32u)atoi64(romCrc, 0x10))) == false) break;
-			matchSha1 = (fi->GetSHA1() && hextouint8(romSha1, romSha1b, 20) && !memcmp(fi->sha1, romSha1b, 20));
+			matchSha1 = (crcOnlyCheck || (fi->GetSHA1() && hextouint8(romSha1, romSha1b, 20) && !memcmp(fi->sha1, romSha1b, 20)));
 			break;
 		}
 
@@ -2401,7 +2401,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 			{
 				if ((matchSize = (size == fi->size)) == false) continue;
 				if ((matchCrc32 = (fi->GetCRC32() == (Bit32u)atoi64(romCrc, 0x10))) == false) continue;
-				if ((matchSha1 = (fi->GetSHA1() && hextouint8(romSha1, romSha1b, 20) && !memcmp(fi->sha1, romSha1b, 20))) == false) continue;
+				if ((matchSha1 = (crcOnlyCheck || (fi->GetSHA1() && hextouint8(romSha1, romSha1b, 20) && !memcmp(fi->sha1, romSha1b, 20)))) == false) continue;
 				fi->was_matched = true;
 				matchFile = fi;
 				matchDate = (zdate == fi->date);
@@ -2481,7 +2481,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 
 int main(int argc, char *argv[])
 {
-	const char *xmlPath = NULL, *srcPath = NULL, *outPath = NULL, *verifyMode = NULL, *fixMode = NULL, *useSrcDates = NULL, *onlyFullMatch = NULL, *noQuitConfirm = NULL;
+	const char *xmlPath = NULL, *srcPath = NULL, *outPath = NULL, *useSrcDates = NULL, *onlyFullMatch = NULL, *verifyMode = NULL, *fixMode = NULL, *crcOnlyCheck = NULL, *noQuitConfirm = NULL;
 	for (int i = 1; i < argc; i++)
 	{
 		if ((argv[i][0] != '-' && argv[i][0] != '/') || !argv[i][1] || argv[i][2]) goto argerr;
@@ -2490,10 +2490,11 @@ int main(int argc, char *argv[])
 			case 'x': if (xmlPath || ++i == argc) goto argerr; xmlPath       = argv[i]; continue;
 			case 's': if (srcPath || ++i == argc) goto argerr; srcPath       = argv[i]; continue;
 			case 'o': if (outPath || ++i == argc) goto argerr; outPath       = argv[i]; continue;
-			case 'v': if (verifyMode            ) goto argerr; verifyMode    = argv[i]; continue;
-			case 'f': if (fixMode               ) goto argerr; fixMode       = argv[i]; continue;
 			case 'd': if (useSrcDates           ) goto argerr; useSrcDates   = argv[i]; continue;
 			case 'p': if (onlyFullMatch         ) goto argerr; onlyFullMatch = argv[i]; continue;
+			case 'v': if (verifyMode            ) goto argerr; verifyMode    = argv[i]; continue;
+			case 'f': if (fixMode               ) goto argerr; fixMode       = argv[i]; continue;
+			case 'c': if (crcOnlyCheck          ) goto argerr; crcOnlyCheck  = argv[i]; continue;
 			case 'q': if (noQuitConfirm         ) goto argerr; noQuitConfirm = argv[i]; continue;
 		}
 		argerr: LogErr("Unknown command line option '%s'.\n\n", argv[i]); goto help;
@@ -2509,6 +2510,7 @@ int main(int argc, char *argv[])
 			"  -p         : Don't report build failure with only a partial match\n"
 			"  -v         : Verify existing files in output file directory\n"
 			"  -f         : Fix meta data in existing files that fail verification\n"
+			"  -c         : Use fast CRC only check for verification and fixing\n"
 			"  -q         : Don't ask for pressing a key at the end\n"
 			"\n", "DoDAT", "0.4");
 		return 1;
@@ -2561,7 +2563,7 @@ int main(int argc, char *argv[])
 
 	if (verifyMode || fixMode)
 	{
-		Log("%sing games in output path %s...\n\n", (fixMode ? "Fix" : "Verify"), (outPath ? outPath : ""));
+		Log("%sing games in output path %s%s...\n\n", (fixMode ? "Fix" : "Verify"), (outPath ? outPath : ""), (crcOnlyCheck ? " (quick CRC32 only check)" : " (full SHA1 data verification)"));
 
 		std::string workPath;
 		std::vector<SFile*> workFiles;
@@ -2574,7 +2576,7 @@ int main(int argc, char *argv[])
 			if (x == XML_TEXT || x == XML_ELEM_END || !XMLMatchTag(pGame, pGameEn, (pGame[1] == 'g' ? "game" : "machine"), (pGame[1] == 'g' ? 4 : 7), "name", &gameName, &gameNameX, NULL) || x == XML_ELEM_SOLO) continue;
 			if (!haveMultipleGames) { if (!firstGameName) { firstGameName = gameName; firstGameNameX = gameNameX; } else { haveMultipleGames = true; } }
 
-			lastResult = VerifyGame(pGameEn, gameName, gameNameX, outBase, workPath, workFiles, !!fixMode, &pGameEn);
+			lastResult = VerifyGame(pGameEn, gameName, gameNameX, outBase, workPath, workFiles, !!fixMode, !!crcOnlyCheck, &pGameEn);
 		}
 		if (!haveMultipleGames && firstGameName && !lastResult) 
 			Log("Failed to locate %.*s to %s!\n\n", (int)(firstGameNameX - firstGameName), firstGameName, (fixMode ? "fix" : "verify"));
