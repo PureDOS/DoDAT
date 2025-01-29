@@ -1453,7 +1453,7 @@ struct SFileIso : SFile
 				if (in_zeros > 0 || out_zeros > 0 || read_size != data_size) memset(&buf[0], 0, buf.size());
 				if (needsize)
 				{
-					Bit8u *pTrg = &buf[0] + (in_zeros > 0 ? in_zeros : 0), *pTrgEnd = pTrg + needsize;
+					Bit8u *pTrg = &buf[0] + (in_zeros > 0 ? in_zeros : t.inzeros), *pTrgEnd = pTrg + needsize;
 					Bit32u tFrame = (Bit32u)(t.start + t.inzeros / data_size), tFrameEnd = tFrame + (Bit32u)((tSize + data_size - 1) / data_size);
 					if (Bit32u tZeroOfs = (t.inzeros % data_size))
 					{
