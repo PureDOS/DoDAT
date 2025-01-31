@@ -490,41 +490,23 @@ struct SFileMemory : SFile
 	virtual Bit64u Seek(Bit64s ofs, int origin = SEEK_SET) { switch (origin) { case SEEK_SET: default: pos = (Bit64u)ofs; break; case SEEK_CUR: pos += ofs; break; case SEEK_END: pos = size + ofs; break; } return (pos > size ? (pos = size) : pos); }
 
 	// Generate a file from Base64
-	SFileMemory(const char* base64, size_t len) : buf(len ? (Bit8u*)malloc((len + 3) / 4 * 3) : (Bit8u*)NULL), pos((Bit64u)-1)
+	SFileMemory(const char* base64, size_t len) : SFileMemory(len)
 	{
+		path.assign("<EMBEDDED>"); Bit8u* trg = buf;
 		static const Bit8u base64dec[256] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,62,0,0,0,63,52,53,54,55,56,57,58,59,60,61,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,0};
-		Bit8u* pOut = buf;
 		for (const Bit8u* pIn = (const Bit8u*)base64; len; len -= 4, pIn += 4)
 		{
-			*pOut = (base64dec[pIn[0]] << 2);
+			*trg = (base64dec[pIn[0]] << 2);
 			if (len == 1 || pIn[1] == '=') break;
-			*(pOut++) |= ((base64dec[pIn[1]] >> 4) & 0x3);
-			*pOut = (base64dec[pIn[1]] << 4);
+			*(trg++) |= ((base64dec[pIn[1]] >> 4) & 0x3);
+			*trg = (base64dec[pIn[1]] << 4);
 			if (len == 2 || pIn[2] == '=') break;
-			*(pOut++) |= (base64dec[pIn[2]] >> 2) & 0xf;
-			*pOut = (base64dec[pIn[2]] << 6);
+			*(trg++) |= (base64dec[pIn[2]] >> 2) & 0xf;
+			*trg = (base64dec[pIn[2]] << 6);
 			if (len == 3 || pIn[3] == '=') break;
-			*(pOut++) |= (base64dec[pIn[3]]);
+			*(trg++) |= (base64dec[pIn[3]]);
 		}
-		size = (size_t)(pOut - buf);
-	}
-
-	// Generate a file from CRC and SHA1 (up to 7 bytes)
-	SFileMemory(Bit64u _size, Bit32u crc, Bit8u sha1[20]) : buf(_size ? (Bit8u*)malloc((size_t)_size) : (Bit8u*)NULL), pos((Bit64u)-1)
-	{
-		typ = T_MEMORY;
-		size = _size;
-		if (_size <= 4) { RawUnCRC32(~crc, (Bit8u)_size, buf); for (Bit64u i = 0; i != _size; i++) buf[i] = ~buf[i]; return; }
-		if (_size > 7) { ZIP_ASSERT(false); return; } // 7 is slow and 8 takes a very long time, more is unreasonable
-		for (Bit64u i = 0, n = _size - 4; ; i++)
-		{
-			Bit8u test[8] = { (Bit8u)i, (Bit8u)(i >> 8), (Bit8u)(i >> 16), (Bit8u)(i >> 24), 0, 0, 0, 0 };
-			RawUnCRC32((crc ^ CRC32(test, (size_t)_size)), 4, test + n);
-
-			Bit8u compSha1[20];
-			SHA1_CTX::Run(test, (size_t)_size, compSha1);
-			if (sha1[0] == compSha1[0] && !memcmp(sha1, compSha1, sizeof(compSha1))) { memcpy(buf, test, (size_t)_size); return; } // found
-		}
+		size = (size_t)(trg - buf);
 	}
 
 	// Read entire input file into buf
@@ -534,6 +516,22 @@ struct SFileMemory : SFile
 		if (wasOpen) fiLoad.Seek(0); else fiLoad.Open();
 		fiLoad.Read(buf, size);
 		if (!wasOpen) fiLoad.Close();
+	}
+
+	// Generate a file from CRC and SHA1 (up to 7 bytes)
+	static SFileMemory* BuildFromCRC(Bit64u _size, Bit32u crc, Bit8u sha1[20])
+	{
+		if (_size > 7) { ZIP_ASSERT(false); return NULL; } // 7 is slow and 8 takes a very long time, more is unreasonable
+		SFileMemory* res = new SFileMemory(_size); res->path.assign("<GENERATED>"); Bit8u* trg = res->buf;
+		if (_size <= 4) { RawUnCRC32(~crc, (Bit8u)_size, trg); for (Bit64u i = 0; i != _size; i++) trg[i] = ~trg[i]; return res; }
+		for (Bit64u i = 0, n = _size - 4; ; i++)
+		{
+			Bit8u test[8] = { (Bit8u)i, (Bit8u)(i >> 8), (Bit8u)(i >> 16), (Bit8u)(i >> 24), 0, 0, 0, 0 };
+			RawUnCRC32((crc ^ CRC32(test, (size_t)_size)), 4, test + n);
+			Bit8u compSha1[20];
+			SHA1_CTX::Run(test, (size_t)_size, compSha1);
+			if (sha1[0] == compSha1[0] && !memcmp(sha1, compSha1, sizeof(compSha1))) { memcpy(trg, test, (size_t)_size); return  res; } // found
+		}
 	}
 
 	// Patch a file with a IPS or BPS patch encoded as Base64 in the DAT XML
@@ -727,6 +725,7 @@ struct SFileZip : SFileMemory
 	}
 
 	bool Unpack(Bit64u unpack_until);
+	static SFileMemory* BuildDeflated(const Bit8u* data, size_t comp_len, size_t uncomp_len);
 
 	enum { METHOD_STORED = 0, METHOD_SHRUNK = 1, METHOD_IMPLODED = 6, METHOD_DEFLATED = 8 };
 	static bool MethodSupported(Bit32u method) { return (method == METHOD_DEFLATED || method == METHOD_STORED || method == METHOD_SHRUNK || method == METHOD_IMPLODED); }
@@ -2219,8 +2218,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		if (!r && closeInfoSection) Log("  ----------------------------------------------------------------------------------\n");
 		r++; //make sure to increment r before continue
 		Bit64u size = atoi64(romSize);
-		if (size < 7 && (!useSrcDates || (!size && (romNameX[-1] == '/' || romNameX[-1] == '\\')))) { matches++; continue; } // can auto generate
-		if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40)) { matches++; continue; } // known file
+		if (!size && (romNameX[-1] == '/' || romNameX[-1] == '\\')) { matches++; continue; } // directory
 
 		SFile* romFile = NULL;
 		for (SFile* fi : files)
@@ -2242,22 +2240,26 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 			break;
 		}
 
-		// If the XML has the file content encoded in Base64, use that
-		if (romData && romSha1 && (romFile = new SFileMemory(romData, (size_t)(romDataX - romData))) != NULL)
+		if (!romFile)
 		{
-			gameFiles.push_back(romFile); // remember to delete during cleanup
-			Bit8u romSha1b[20];
-			if (romFile->size != size || !romFile->GetSHA1() || !hextouint8(romSha1, romSha1b, 20) || memcmp(romFile->sha1, romSha1b, 20)) romFile = NULL;
-			else romFile->path.assign("Embedded Data");
+			Bit8u romSha1b[20], verify = 0;
+			static const unsigned char emptyDataBinComp[] = "\355\331\305A\4\61\0\5\320\37.#7\354\214T0\324\0\5\320\177\61\254\260\356\212\356{\23\237\344\32\r\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\204\362\372\326u/%\217'\312\330\375$\333\241\f\302\60\246\256\323\346S{\223\251\333\f<\347.\237\356Rg\240\316{>]M\306?~\37\350\226\344\210\206\22\200_\241\67^\377\1\200\313Qr\367\231\2\0\227\243d\340n\224\1\0\27a\367\33\373\356\36%\0\300\237\322\7";
+			static const size_t emptyDataBinSize = 43008, emptyDataBinCompSize = sizeof(emptyDataBinComp) - 1; //exclude string null terminator
+
+			// If the file is less than 7 bytes we can just generate it
+			if      (size < 7 && hextouint8(romSha1, romSha1b, 20) && (romFile = SFileMemory::BuildFromCRC(size, (Bit32u)atoi64(romCrc, 0x10), romSha1b)) != NULL) {}
+			// If the XML has the file content encoded in Base64, use that
+			else if (romData && (romFile = new SFileMemory(romData, (size_t)(romDataX - romData))) != NULL) verify = 1;
+			// See if this is the known embedded empty data bin file
+			else if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40) && (romFile = SFileZip::BuildDeflated(emptyDataBinComp, emptyDataBinCompSize, emptyDataBinSize)) != NULL) {}
+			// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
+			else if (x == XML_ELEM_START && matches == r - 1 && (romFile = SFileIso::BuildCHD(files, pEnd, size, romSha1)) != NULL) {}
+			// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
+			else if (x == XML_ELEM_START && matches == r - 1 && (romFile = SFileMemory::BuildPatched(files, pEnd, size, romSha1)) != NULL) {}
+
+			if (romFile) gameFiles.push_back(romFile); // remember to delete during cleanup
+			if (verify && (romFile->size != size || !romFile->GetSHA1() || !hextouint8(romSha1, romSha1b, 20) || memcmp(romFile->sha1, romSha1b, 20))) romFile = NULL;
 		}
-
-		// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
-		if (!romFile && x == XML_ELEM_START && matches == r - 1 && (romFile = SFileIso::BuildCHD(files, pEnd, size, romSha1)) != NULL)
-			gameFiles.push_back(romFile); // remember to delete during cleanup
-
-		// See if this is a CHD image we perhaps can build out of ISO/CUE/BIN file(s)
-		if (!romFile && x == XML_ELEM_START && matches == r - 1 && (romFile = SFileMemory::BuildPatched(files, pEnd, size, romSha1)) != NULL)
-			gameFiles.push_back(romFile); // remember to delete during cleanup
 
 		if (romFile || size < 7) { gameFiles[r-1] = romFile; matches++; continue; } // can auto generate size < 7
 		XMLInlineStringConvert(romName, romNameX);
@@ -2308,30 +2310,6 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 			{
 				if (!isFix) Log("    Generating %s [%s] ...\n", ((romNameX[-1] == '/' || romNameX[-1] == '\\') ? "directory" : "empty"), romName);
 				z.WriteFile(romName, (romNameX[-1] == '/' || romNameX[-1] == '\\'), 0, zdate, ztime, NULL);
-			}
-			else if (size < 7)
-			{
-				Bit8u genSha1[20];
-				hextouint8(romSha1, genSha1, 20);
-				SFileMemory gen(size, (Bit32u)atoi64(romCrc, 0x10), genSha1);
-				if (!isFix) Log("    Generating [%s] of size %d...\n", romName, (int)size);
-				z.WriteFile(romName, false, (Bit32u)size, zdate, ztime, &gen);
-			}
-			else if (size == 43008 && !strncasecmp(romSha1, "8a2846aac1e2ceb8a08a9cd5591e9a85228d5cab", 40))
-			{
-				SFileMemory gen(size);
-				static const Bit8u emptyDataBinComp[] = "\200\0\0\0\377\1\21\377\2\"\377\3\63\377\4D\377\5U\377\6f\377\0\7w\377\b\210\377\t\231\377\n\252\377\v\273\377\f\314\377\r\335\377\16\356\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377?\17\377\377_\377\1CD001\344\1\0 \0\0-o\377\25\260\6\0w\t>\20z \3\0\b\b\0\nO\377\327\n\22\217\377\23/\377\"\0\24wO\377\24\0\b/\377\b\0PQO\377\2`? \0\0\377\1\21\377\2\":0P\320\0\0\0\20!\1\17\377\377\17\377\377\17\377\377\17\377\377@\17\377\70\377W\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377p?c\f\224\377\r\244\377\16\265\377\17\306\377\4\17\377\377\17\377\377\17\377\377\7\377s\37\372\24\b\0\377\17\377\377\2\17\377\377\17\377\377\17\377\377\17\377\377\17\377\377\17\377q\"?\377]8\3\b/\377\b\0PO\377\2`8\33\1\1\0!\20\b;\377\17\377\377\17\377\377\17\377\377\0\17\377\377\17\377\377\17\377\377\17\377\64";
-				const Bit8u *in = emptyDataBinComp;
-				for (Bit8u bits = 0, code = 0, *out = &gen.buf[0], *out_end = out + 43008; out != out_end; code <<= 1, bits--)
-				{
-					if (bits == 0) { code = *in++; bits = 8; }
-					if ((code & 0x80) != 0) { *out++ = *in++; continue; }
-					int RLE1 = *in++, RLE = (RLE1<<8|*in++), RLESize = ((RLE >> 12) == 0 ? (*in++ + 0x12) : (RLE >> 12) + 2), RLEOffset = ((RLE & 0xFFF) + 1);
-					while (RLESize > RLEOffset) { memcpy(out, out - RLEOffset, RLEOffset); out += RLEOffset; RLESize -= RLEOffset; RLEOffset <<= 1; }
-					memcpy(out, out - RLEOffset, RLESize); out += RLESize;
-				}
-				if (!isFix) Log("    Storing known file [%s] of size %d ...\n", romName, (int)size);
-				z.WriteFile(romName, false, (Bit32u)size, zdate, ztime, &gen);
 			}
 			else { ZIP_ASSERT(false); } // should not be possible
 			*romNameX = romName[-1]; // undo null terminate
@@ -3580,4 +3558,21 @@ bool SFileZip::Unpack(Bit64u unpack_until)
 	else { bad: ZIP_ASSERT(false); size = 0; return false; }
 	ZIP_ASSERT(size > 5000000 || unpacked < size || CRC32(buf, (size_t)size) == crc32);
 	return true;
+}
+
+SFileMemory* SFileZip::BuildDeflated(const Bit8u* data, size_t comp_len, size_t uncomp_len)
+{
+	SFileMemory* res = new SFileMemory(uncomp_len); res->path.assign("<GENERATED>"); Bit8u* trg = res->buf;
+	miniz::tinfl_decompressor inflator;
+	miniz::tinfl_init(&inflator);
+	const Bit8u *src = data, *src_end = src + comp_len, *trg_start = trg, *trg_end = trg_start + uncomp_len;
+	for (miniz::tinfl_status status = miniz::TINFL_STATUS_HAS_MORE_OUTPUT; status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT;)
+	{
+		Bit32u in_size = (Bit32u)(src_end - src), out_size = (Bit32u)(trg_end - trg);
+		status = miniz::tinfl_decompress(&inflator, src, &in_size, (Bit8u*)trg_start, trg, &out_size, miniz::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+		src += in_size;
+		trg += out_size;
+		ZIP_ASSERT(status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT || status == miniz::TINFL_STATUS_DONE);
+	}
+	return res;
 }
