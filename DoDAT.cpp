@@ -407,6 +407,15 @@ struct SFile
 		while (p != pBegin && r != rom) { char a = *(--r), b = *(--p); if ((a>='A'&&a<='Z'?(a|0x20):a=='\\'?'/':a) != (b>='A'&&b<='Z'?(b|0x20):b=='\\'?'/':b)) { p++; break; } }
 		return (size_t)(pEnd - p);
 	}
+	bool Contains(const char* child_path)
+	{
+		for (char *pa = (char*)path.c_str(), *pb = (char*)child_path, a, b;;)
+		{
+			if ((a = *(pa++)) == (b = *(pb++))) { if (!a) { return false; } continue; }
+			if (!b && a == '/') return true; // containers always use / between real file and contained file
+			if (((a >= 'A' && a <= 'Z') ? (a|0x20) : a == '\\' ? '/' : a) != ((b >= 'A' && b <= 'Z') ? (b|0x20) : b == '\\' ? '/' : b)) return false;
+		}
+	}
 };
 
 struct SFileRaw : SFile
@@ -2198,6 +2207,12 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	std::vector<SFile*> gameFiles;
 	gameFiles.resize(needRoms); // all NULL
 
+	std::string tmpPath;
+	tmpPath.assign(outBase).append(gameName, gameNameX - gameName);
+	if (isFix) tmpPath.append(".fix");
+	else if (tmpPath.length() < 5 || ((&tmpPath.back())[-3] != '.' && (&tmpPath.back())[-4] != '.')) tmpPath.append(".zip");
+	const char* outPath = tmpPath.c_str();
+
 	Bit32u r, matches = 0;
 	bool closeInfoSection = false;
 	for (r = 0, p = pGameInner; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x, &textStart, &textEnd)) != NULL; p = pNext)
@@ -2223,7 +2238,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		SFile* romFile = NULL;
 		for (SFile* fi : files)
 		{
-			if (fi->size != size || fi->GetCRC32() != (Bit32u)atoi64(romCrc, 0x10)) continue;
+			if (fi->size != size || fi->Contains(outPath) || fi->GetCRC32() != (Bit32u)atoi64(romCrc, 0x10)) continue;
 			Bit8u romSha1b[20];
 			if (!fi->GetSHA1() || !hextouint8(romSha1, romSha1b, 20) || memcmp(fi->sha1, romSha1b, 20)) continue;
 			if (useSrcDates)
@@ -2270,13 +2285,9 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	if (!res) { if (logPartialMatch) Log("Unable to build %.*s\n\n", (int)(gameNameX - gameName), gameName); }
 	else
 	{
-		std::string zipPath;
-		zipPath.assign(outBase).append(gameName, gameNameX - gameName);
-		if (isFix) zipPath.append(".fix");
-		else if (zipPath.length() < 5 || ((&zipPath.back())[-3] != '.' && (&zipPath.back())[-4] != '.')) zipPath.append(".zip");
-		if (!isFix) Log("  --> Writing output %s ...\n", zipPath.c_str());
-		SFileZip::Writer z(zipPath.c_str());
-		if (z.failed) LogErr("  ERROR: Could not open output file %s\n\n", zipPath.c_str());
+		if (!isFix) Log("  --> Writing output %s ...\n", outPath);
+		SFileZip::Writer z(outPath);
+		if (z.failed) LogErr("  ERROR: Could not open output file %s\n\n", outPath);
 		for (r = 0, p = pGameInner; !z.failed && p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x, &textStart, &textEnd)) != NULL; p = pNext)
 		{
 			char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romDate, *romDateX;
@@ -2315,7 +2326,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 			*romNameX = romName[-1]; // undo null terminate
 		}
 		if (!z.failed) z.Finalize();
-		if (z.failed) LogErr("  ERROR: Unknown error writing output file %s\n\n", zipPath.c_str());
+		if (z.failed) LogErr("  ERROR: Unknown error writing output file %s\n\n", outPath);
 		if (!isFix) Log("  Done! Successfully wrote %.*s with %u files!\n\n", (int)(gameNameX - gameName), gameName, needRoms);
 		res = !z.failed;
 	}
