@@ -32,7 +32,6 @@
 #include <dirent.h>
 #include <unistd.h>
 #endif
-#include "miniz.inl"
 
 typedef unsigned char Bit8u;
 typedef unsigned short Bit16u;
@@ -63,6 +62,7 @@ typedef signed __int64 Bit64s;
 #define fseek_wrap(fp, offset, whence) fseek(fp, (long)offset, whence)
 #define ftell_wrap(fp) ftell(fp)
 #endif
+static Bit8u ReadBuf[1024 * 512];
 
 static void LogErr(const char* fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fflush(stderr); }
 static void Log(const char* fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(stdout, fmt, ap); va_end(ap); fflush(stdout); }
@@ -392,8 +392,7 @@ struct SFile
 		{
 			bool wasOpen = IsOpen();
 			if (wasOpen) Seek(0); else Open();
-			Bit8u buf[1024];
-			for (Bit64u sz; (sz = Read(buf, 1024)) != 0;) crc32 = CRC32(buf, (size_t)sz, crc32);
+			for (Bit64u sz; (sz = Read(ReadBuf, sizeof(ReadBuf))) != 0;) crc32 = CRC32(ReadBuf, (size_t)sz, crc32);
 			if (!wasOpen) Close();
 		}
 		have_crc32 = true;
@@ -407,8 +406,7 @@ struct SFile
 		{
 			bool wasOpen = IsOpen();
 			if (wasOpen) Seek(0); else Open();
-			Bit8u buf[1024];
-			for (Bit64u sz; (sz = Read(buf, 1024)) != 0;) ctx.Process(buf, (size_t)sz);
+			for (Bit64u sz; (sz = Read(ReadBuf, sizeof(ReadBuf))) != 0;) ctx.Process(ReadBuf, (size_t)sz);
 			if (!wasOpen) Close();
 		}
 		ctx.Finish(sha1);
@@ -755,6 +753,7 @@ struct SFileZip : SFileMemory
 
 	bool Unpack(Bit64u unpack_until);
 	static SFileMemory* BuildDeflated(const Bit8u* data, size_t comp_len, size_t uncomp_len);
+	static bool CompressInto(FILE* f, SFile* fsrc, Bit32u& out_crc, Bit32u& out_compsize);
 
 	enum { METHOD_STORED = 0, METHOD_SHRUNK = 1, METHOD_IMPLODED = 6, METHOD_DEFLATED = 8 };
 	static bool MethodSupported(Bit32u method) { return (method == METHOD_DEFLATED || method == METHOD_STORED || method == METHOD_SHRUNK || method == METHOD_IMPLODED); }
@@ -907,7 +906,6 @@ struct SFileZip : SFileMemory
 			//if (1) { if (is_dir) return; } // force skip directory entries
 			Bit16u inpathLen = (Bit16u)strlen(innerpath), pathLen = inpathLen + ((is_dir && innerpath[inpathLen - 1] != '/' && innerpath[inpathLen - 1] != '\\') ? 1 : 0), wmethod = METHOD_STORED;
 			Bit32u wsize = (fsrc ? (Bit32u)fsrc->size : (Bit32u)0), wcrc32 = 0, extAttr = (is_dir ? 0x10 : 0), compsize = 0;
-			static Bit8u s_outbuf[1024 * 512], s_inbuf[1024 * 512];
 
 			if (is_dir || !wsize || !fsrc) { ZIP_ASSERT(!wsize); wsize = 0; }
 			else if (keep_already_compressed && fsrc->typ == SFile::T_ZIP)
@@ -923,9 +921,9 @@ struct SFileZip : SFileMemory
 					wcrc32 = zsrc.crc32;
 					for (size_t comp_remain = compsize, n; comp_remain && !failed; comp_remain -= n)
 					{
-						n = (comp_remain < sizeof(s_inbuf) ? comp_remain : sizeof(s_inbuf));
-						failed |= (zsrc.reader.archive.Read(s_inbuf, n) != n);
-						failed |= !fwrite(s_inbuf, n, 1, f);
+						n = (comp_remain < sizeof(ReadBuf) ? comp_remain : sizeof(ReadBuf));
+						failed |= (zsrc.reader.archive.Read(ReadBuf, n) != n);
+						failed |= !fwrite(ReadBuf, n, 1, f);
 					}
 					fseek_wrap(f, local_file_offset, SEEK_SET);
 				}
@@ -938,74 +936,25 @@ struct SFileZip : SFileMemory
 				// Write file and calculate CRC32 along the way
 				fseek_wrap(f, 30 + pathLen, SEEK_CUR);
 
-				// create tdefl() compatible flags (we have to compose the low-level flags ourselves
-				// The number of dictionary probes to use at each compression level (0-10). 0=implies fastest/minimal possible probing.
-				static const mz_uint s_tdefl_num_probes[11] = { 0, 1, 6, 32, 16, 32, 128, 256, 512, 768, 1500 };
-				const size_t level = 10;
-				const mz_uint comp_flags = /*TDEFL_WRITE_ZLIB_HEADER |*/ s_tdefl_num_probes[MZ_MIN(10, level)] | ((level <= 3) ? TDEFL_GREEDY_PARSING_FLAG : 0);
-
-				// Initialize the low-level compressor.
-				static tdefl_compressor deflator;
-				tdefl_init(&deflator, NULL, NULL, comp_flags);
-
-				const Bit8u *next_in = s_inbuf;
-				Bit8u *next_out = s_outbuf;
-				size_t avail_out = sizeof(s_outbuf), avail_in = 0, src_remain = wsize;
-				ZIP_ASSERT(src_remain == fsrc->size);
-
-				// Compression.
 				bool wasOpen = fsrc->IsOpen();
 				if (wasOpen) fsrc->Seek(0); else if (!fsrc->Open()) { failed = true; return; }
-				for (;;)
-				{
-					if (!avail_in && src_remain)
-					{
-						size_t n = (src_remain < sizeof(s_inbuf) ? src_remain : sizeof(s_inbuf));
-						failed |= (fsrc->Read(s_inbuf, n) != n);
-						next_in = s_inbuf;
-						avail_in = n;
-						src_remain -= n;
-						wcrc32 = CRC32(next_in, (size_t)avail_in, wcrc32);
-					}
 
-					// Compress as much of the input as possible (or all of it) to the output buffer.
-					size_t in_bytes = avail_in, out_bytes = avail_out;
-					tdefl_status status = tdefl_compress(&deflator, next_in, &in_bytes, next_out, &out_bytes, src_remain ? TDEFL_NO_FLUSH : TDEFL_FINISH);
-
-					next_in += in_bytes;
-					avail_in -= in_bytes;
-
-					next_out += out_bytes;
-					avail_out -= out_bytes;
-					compsize += (Bit32u)out_bytes;
-
-					if (status != TDEFL_STATUS_OKAY || !avail_out)
-					{
-						// Output buffer is full, or compression is done or failed, so write buffer to output file.
-						Bit32u n = sizeof(s_outbuf) - (Bit32u)avail_out;
-						failed |= !fwrite(s_outbuf, n, 1, f);
-						next_out = s_outbuf;
-						avail_out = sizeof(s_outbuf);
-					}
-					if (status == TDEFL_STATUS_DONE) break; // Compression completed successfully.
-					if (status != TDEFL_STATUS_OKAY) { failed = true; ZIP_ASSERT(false); break; } // Compression somehow failed.
-				}
-				ZIP_ASSERT(src_remain == 0 && avail_in == 0);
+				failed |= !CompressInto(f, fsrc, wcrc32, compsize);
 
 				// Fall back to storing raw if compression didn't do much
-				if (compsize + (compsize / 100) >= wsize)
+				if (!failed && compsize + (compsize / 100) >= wsize)
 				{
 					fseek_wrap(f, local_file_offset + 30 + pathLen, SEEK_SET);
-					src_remain = wsize;
+					Bit32u src_remain = wsize;
 					fsrc->Seek(0, SEEK_SET);
-					for (int read; src_remain && (read = (int)fsrc->Read(s_inbuf, sizeof(s_inbuf))) > 0; src_remain -= read)
-						failed |= !fwrite(s_inbuf, read, 1, f);
+					for (int read; src_remain && (read = (int)fsrc->Read(ReadBuf, sizeof(ReadBuf))) > 0; src_remain -= read)
+						failed |= !fwrite(ReadBuf, read, 1, f);
 					ZIP_ASSERT(src_remain == 0);
 					compsize = wsize;
 				}
 				if (!wasOpen) fsrc->Close();
+				if (failed) return;
 				wmethod = (Bit16u)(compsize == wsize ? METHOD_STORED : METHOD_DEFLATED);
-
 				fseek_wrap(f, local_file_offset, SEEK_SET);
 			}
 
@@ -3121,7 +3070,7 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-struct miniz
+struct mz_inflate
 {
 	// BASED ON MINIZ
 	// miniz.c v1.15 - public domain deflate
@@ -3130,8 +3079,6 @@ struct miniz
 	// Set MINIZ_HAS_64BIT_REGISTERS to 1 if operations on 64-bit integers are reasonably fast (and don't involve compiler generated calls to helper functions).
 	#if defined(_M_X64) || defined(_WIN64) || defined(__MINGW64__) || defined(_LP64) || defined(__LP64__) || defined(__ia64__) || defined(__x86_64__)
 	#define MINIZ_HAS_64BIT_REGISTERS 1
-	#else
-	#define MINIZ_HAS_64BIT_REGISTERS 0
 	#endif
 
 	enum
@@ -3973,6 +3920,8 @@ struct unz_explode
 	}
 };
 
+#include "miniz.inl"
+
 bool SFileZip::Unpack(Bit64u unpack_until)
 {
 	ZIP_ASSERT(size && method != METHOD_STORED);
@@ -3980,11 +3929,11 @@ bool SFileZip::Unpack(Bit64u unpack_until)
 	SFile& fi = reader.archive;
 	if (method == METHOD_DEFLATED)
 	{
-		struct deflate_state { miniz::tinfl_decompressor inflator; Bit8u read_buf[miniz::MZ_ZIP_MAX_IO_BUF_SIZE]; Bit32u read_buf_avail, read_buf_ofs, comp_remaining; } *st = (deflate_state*)decomp_state;
+		struct deflate_state { mz_inflate::tinfl_decompressor inflator; Bit8u read_buf[mz_inflate::MZ_ZIP_MAX_IO_BUF_SIZE]; Bit32u read_buf_avail, read_buf_ofs, comp_remaining; } *st = (deflate_state*)decomp_state;
 		if (!st)
 		{
 			decomp_state = st = (deflate_state*)malloc(sizeof(deflate_state));
-			miniz::tinfl_init(&st->inflator);
+			mz_inflate::tinfl_init(&st->inflator);
 			st->read_buf_avail = st->read_buf_ofs = 0;
 			st->comp_remaining = comp_size;
 		}
@@ -3997,11 +3946,11 @@ bool SFileZip::Unpack(Bit64u unpack_until)
 		buf = (Bit8u*)realloc(buf, (size_t)unpack_until);
 		//printf("Unpacking %s until %u ...\n", path.c_str(), (unsigned)unpack_until);
 
-		for (miniz::tinfl_status status = miniz::TINFL_STATUS_NEEDS_MORE_INPUT; (status == miniz::TINFL_STATUS_NEEDS_MORE_INPUT || status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT) && unpacked != unpack_until;)
+		for (mz_inflate::tinfl_status status = mz_inflate::TINFL_STATUS_NEEDS_MORE_INPUT; (status == mz_inflate::TINFL_STATUS_NEEDS_MORE_INPUT || status == mz_inflate::TINFL_STATUS_HAS_MORE_OUTPUT) && unpacked != unpack_until;)
 		{
 			if (!st->read_buf_avail)
 			{
-				st->read_buf_avail = (st->comp_remaining < miniz::MZ_ZIP_MAX_IO_BUF_SIZE ? st->comp_remaining : miniz::MZ_ZIP_MAX_IO_BUF_SIZE);
+				st->read_buf_avail = (st->comp_remaining < mz_inflate::MZ_ZIP_MAX_IO_BUF_SIZE ? st->comp_remaining : mz_inflate::MZ_ZIP_MAX_IO_BUF_SIZE);
 				if (fi.Read(st->read_buf, st->read_buf_avail) != st->read_buf_avail)
 					break;
 				st->comp_remaining -= st->read_buf_avail;
@@ -4010,12 +3959,12 @@ bool SFileZip::Unpack(Bit64u unpack_until)
 			Bit32u out_buf_size = (Bit32u)(unpack_until - unpacked);
 			Bit8u *pWrite_buf_cur = buf + unpacked;
 			Bit32u in_buf_size = st->read_buf_avail;
-			status = miniz::tinfl_decompress(&st->inflator, st->read_buf + st->read_buf_ofs, &in_buf_size, buf, pWrite_buf_cur, &out_buf_size, miniz::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | (st->comp_remaining ? miniz::TINFL_FLAG_HAS_MORE_INPUT : 0));
+			status = mz_inflate::tinfl_decompress(&st->inflator, st->read_buf + st->read_buf_ofs, &in_buf_size, buf, pWrite_buf_cur, &out_buf_size, mz_inflate::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | (st->comp_remaining ? mz_inflate::TINFL_FLAG_HAS_MORE_INPUT : 0));
 			st->read_buf_avail -= in_buf_size;
 			st->read_buf_ofs += in_buf_size;
 			unpacked += out_buf_size;
 			ZIP_ASSERT(!out_buf_size || unpacked <= unpack_until);
-			ZIP_ASSERT(status == miniz::TINFL_STATUS_NEEDS_MORE_INPUT || status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT || status == miniz::TINFL_STATUS_DONE);
+			ZIP_ASSERT(status == mz_inflate::TINFL_STATUS_NEEDS_MORE_INPUT || status == mz_inflate::TINFL_STATUS_HAS_MORE_OUTPUT || status == mz_inflate::TINFL_STATUS_DONE);
 		}
 		if (unpacked == size) { free(decomp_state); decomp_state = NULL; }
 	}
@@ -4065,16 +4014,77 @@ bool SFileZip::Unpack(Bit64u unpack_until)
 SFileMemory* SFileZip::BuildDeflated(const Bit8u* data, size_t comp_len, size_t uncomp_len)
 {
 	SFileMemory* res = new SFileMemory(uncomp_len); res->path.assign("<GENERATED>"); Bit8u* trg = res->buf;
-	miniz::tinfl_decompressor inflator;
-	miniz::tinfl_init(&inflator);
+	mz_inflate::tinfl_decompressor inflator;
+	mz_inflate::tinfl_init(&inflator);
 	const Bit8u *src = data, *src_end = src + comp_len, *trg_start = trg, *trg_end = trg_start + uncomp_len;
-	for (miniz::tinfl_status status = miniz::TINFL_STATUS_HAS_MORE_OUTPUT; status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT;)
+	for (mz_inflate::tinfl_status status = mz_inflate::TINFL_STATUS_HAS_MORE_OUTPUT; status == mz_inflate::TINFL_STATUS_HAS_MORE_OUTPUT;)
 	{
 		Bit32u in_size = (Bit32u)(src_end - src), out_size = (Bit32u)(trg_end - trg);
-		status = miniz::tinfl_decompress(&inflator, src, &in_size, (Bit8u*)trg_start, trg, &out_size, miniz::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+		status = mz_inflate::tinfl_decompress(&inflator, src, &in_size, (Bit8u*)trg_start, trg, &out_size, mz_inflate::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
 		src += in_size;
 		trg += out_size;
-		ZIP_ASSERT(status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT || status == miniz::TINFL_STATUS_DONE);
+		ZIP_ASSERT(status == mz_inflate::TINFL_STATUS_HAS_MORE_OUTPUT || status == mz_inflate::TINFL_STATUS_DONE);
 	}
 	return res;
+}
+
+bool SFileZip::CompressInto(FILE* f, SFile* fsrc, Bit32u& out_crc, Bit32u& out_compsize)
+{
+	// create tdefl() compatible flags (we have to compose the low-level flags ourselves
+	// The number of dictionary probes to use at each compression level (0-10). 0=implies fastest/minimal possible probing.
+	static const mz_uint s_tdefl_num_probes[11] = { 0, 1, 6, 32, 16, 32, 128, 256, 512, 768, 1500 };
+	const size_t level = 10;
+	const mz_uint comp_flags = /*TDEFL_WRITE_ZLIB_HEADER |*/ s_tdefl_num_probes[MZ_MIN(10, level)] | ((level <= 3) ? TDEFL_GREEDY_PARSING_FLAG : 0);
+	Bit32u crc = 0, compsize = 0;
+
+	// Initialize the low-level compressor.
+	static tdefl_compressor deflator;
+	tdefl_init(&deflator, NULL, NULL, comp_flags);
+
+	static Bit8u s_outbuf[1024 * 512];
+	const Bit8u *next_in = NULL;
+	Bit8u *next_out = s_outbuf;
+	size_t avail_out = sizeof(s_outbuf), avail_in = 0, src_remain = (size_t)fsrc->size;
+
+	// Compression.
+	bool wasOpen = fsrc->IsOpen();
+	if (wasOpen) fsrc->Seek(0); else if (!fsrc->Open()) return false;
+	for (;;)
+	{
+		if (!avail_in && src_remain)
+		{
+			size_t n = (src_remain < sizeof(ReadBuf) ? src_remain : sizeof(ReadBuf));
+			if (fsrc->Read(ReadBuf, n) != n) return false;
+			next_in = ReadBuf;
+			avail_in = n;
+			src_remain -= n;
+			crc = CRC32(next_in, (size_t)avail_in, crc);
+		}
+
+		// Compress as much of the input as possible (or all of it) to the output buffer.
+		size_t in_bytes = avail_in, out_bytes = avail_out;
+		tdefl_status status = tdefl_compress(&deflator, next_in, &in_bytes, next_out, &out_bytes, src_remain ? TDEFL_NO_FLUSH : TDEFL_FINISH);
+
+		next_in += in_bytes;
+		avail_in -= in_bytes;
+
+		next_out += out_bytes;
+		avail_out -= out_bytes;
+		compsize += (Bit32u)out_bytes;
+
+		if (status != TDEFL_STATUS_OKAY || !avail_out)
+		{
+			// Output buffer is full, or compression is done or failed, so write buffer to output file.
+			Bit32u n = sizeof(s_outbuf) - (Bit32u)avail_out;
+			if (!fwrite(s_outbuf, n, 1, f)) return false;
+			next_out = s_outbuf;
+			avail_out = sizeof(s_outbuf);
+		}
+		if (status == TDEFL_STATUS_DONE) break; // Compression completed successfully.
+		if (status != TDEFL_STATUS_OKAY) { ZIP_ASSERT(false); return false; } // Compression somehow failed.
+	}
+	ZIP_ASSERT(src_remain == 0 && avail_in == 0);
+	out_crc = crc;
+	out_compsize = compsize;
+	return true;
 }
