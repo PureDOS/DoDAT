@@ -430,7 +430,7 @@ struct SFile
 	{
 		FILE* f; bool failed;
 		Writer(const char* path) : f(fopen_utf8(path, "wb")), failed(f == NULL) { }
-		~Writer() { if (f) fclose(f); }
+		virtual ~Writer() { if (f) fclose(f); }
 		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false) = 0;
 		virtual bool Finalize(char* XmlGameInner) = 0;
 	};
@@ -1259,7 +1259,8 @@ struct SFileIso : SFile
 							{ imgFile = fil; break; }
 					if (!imgFile)
 					{
-						imgFile = new SFileRaw(std::string(imgPath, imgPathLen), false);
+						std::string imgPathStr(imgPath, imgPathLen);
+						imgFile = new SFileRaw(imgPathStr, false);
 						if (!imgFile->size) { delete imgFile; imgFile = NULL; }
 						else files.push_back(imgFile);
 					}
