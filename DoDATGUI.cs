@@ -67,7 +67,7 @@ class DoDATGUI : Form
 
         Action refresh = () =>
         {
-            bool on = (f.cmbGame.Items.Count > 0), verifyOrFix = (f.cmbRunMode.SelectedIndex > 0);
+            bool on = (f.cmbGame.Items.Count > 0), verifyOrFix = (f.cmbRunMode.SelectedIndex > 1);
             f.txtInput.Enabled = f.btnInput.Enabled = (on && !verifyOrFix);
             f.txtOutput.Enabled = f.btnOutput.Enabled = on;
             f.cmbGame.Enabled = on;
@@ -164,9 +164,10 @@ class DoDATGUI : Form
             process.ErrorDataReceived  += (sendingProcess, errLine) => { m.WaitOne(); logs.Add(errLine.Data); m.ReleaseMutex(); };
 
             process.StartInfo.Arguments = "-q -s \"" + f.txtInput.Text + "\" -o \"" + f.txtOutput.Text + "\"";
-            if (f.cmbRunMode.SelectedIndex == 3 || f.cmbRunMode.SelectedIndex == 4) process.StartInfo.Arguments += " -f";
-            if (f.cmbRunMode.SelectedIndex == 1 || f.cmbRunMode.SelectedIndex == 2) process.StartInfo.Arguments += " -v";
-            if (f.cmbRunMode.SelectedIndex == 1 || f.cmbRunMode.SelectedIndex == 3) process.StartInfo.Arguments += " -c";
+            if (f.cmbRunMode.SelectedIndex == 1) process.StartInfo.Arguments += " -r";
+            if (f.cmbRunMode.SelectedIndex == 4 || f.cmbRunMode.SelectedIndex == 5) process.StartInfo.Arguments += " -f";
+            if (f.cmbRunMode.SelectedIndex == 2 || f.cmbRunMode.SelectedIndex == 3) process.StartInfo.Arguments += " -v";
+            if (f.cmbRunMode.SelectedIndex == 2 || f.cmbRunMode.SelectedIndex == 4) process.StartInfo.Arguments += " -c";
 
             f.progress.Visible = true;
             if (f.cmbGame.SelectedIndex == 0)
@@ -442,6 +443,7 @@ class DoDATGUI : Form
             this.cmbRunMode.ItemHeight = 13;
             this.cmbRunMode.Items.AddRange(new object[] {
             "Build Game(s)",
+            "Rebuild Game(s)",
             "Quick Verify Game(s)",
             "Full Verify Game(s)",
             "Quick Fix Game(s)",

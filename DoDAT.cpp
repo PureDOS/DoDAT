@@ -218,7 +218,7 @@ static FILE* fopen_utf8(const char* path, const char* mode)
 	return fopen(path, mode);
 }
 
-static bool stat_utf8(const char* path, Bit16u& date, Bit16u& time)
+static bool stat_utf8(const char* path, Bit16u* date = NULL, Bit16u* time = NULL)
 {
 	time_t mtime;
 	#ifdef _WIN32
@@ -240,8 +240,8 @@ static bool stat_utf8(const char* path, Bit16u& date, Bit16u& time)
 		mtime = res.st_mtime;
 	}
 	struct tm *mtm = localtime(&mtime);
-	date = ZIP_PACKDATE(mtm->tm_year+1900, mtm->tm_mon + 1, mtm->tm_mday);
-	time = ZIP_PACKTIME(mtm->tm_hour, mtm->tm_min, mtm->tm_sec);
+	if (date) *date = ZIP_PACKDATE(mtm->tm_year+1900, mtm->tm_mon + 1, mtm->tm_mday);
+	if (time) *time = ZIP_PACKTIME(mtm->tm_hour, mtm->tm_min, mtm->tm_sec);
 	return true;
 }
 
@@ -443,7 +443,7 @@ struct SFileRaw : SFile
 	{
 		typ = T_RAW;
 		path.swap(_path);
-		if (!stat_utf8(path.c_str(), date, time)) { size = 0; return; }
+		if (!stat_utf8(path.c_str(), &date, &time)) { size = 0; return; }
 		if (isdir) { path += '/'; size = 0; return; }
 		if (!Open()) { size = 0; return; }
 		size = Seek(0, SEEK_END);
@@ -2591,7 +2591,9 @@ struct SFileFat : SFile
 	}
 };
 
-static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, const std::vector<SFile*>& files, bool isFix = false, bool forceTry = false, bool useSrcDates = false, bool logPartialMatch = true, char** pGameEn = NULL)
+static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, bool fixMode = false, bool crcOnlyCheck = false, char** pGameEn = NULL, bool* notFound = NULL);
+
+static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, const std::vector<SFile*>& files, bool isFix = false, bool forceTry = false, bool useSrcDates = false, bool logPartialMatch = true, bool verifyExisting = true, char** pGameEn = NULL)
 {
 	Bit32u needRoms = 0, haveSizeMatches = 0; Bit64u testForCHDWithSize = (Bit64u)-1;
 	char* p, *pEnd, *pNext, *textStart, *textEnd, *testForCHD = NULL;
@@ -2638,17 +2640,22 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	}
 
 	XMLInlineStringConvert(gameName, gameNameX);
+	workPath.assign(outBase).append(gameName, gameNameX - gameName);
+	if (workPath.length() < 5 || ((&workPath.back())[-3] != '.' && (&workPath.back())[-4] != '.')) workPath.append(".zip");
+	if (!isFix && verifyExisting && stat_utf8(workPath.c_str()))
+	{
+		if (VerifyGame(pGameInner, gameName, gameNameX, outBase, workPath, true)) return true;
+		Log("  Game failed to verify or fix, run with -r to force rebuilding games\n");
+		return false;
+	}
+	if (isFix) workPath.append(".fix");
+	const char *outPath = workPath.c_str(), *ext3, *ext4; size_t outPathLen = workPath.length();
+	PathGetExt(outPath, outPathLen - (isFix ? 4 : 0), ext3, ext4);
+
 	if (!isFix && logPartialMatch) Log("Trying to build %.*s, finding matches for %u files ...\n", (int)(gameNameX - gameName), gameName, needRoms);
 	if (!needRoms) { Log("  Done! Not building game with no files\n\n"); return true; }
 	std::vector<SFile*> gameFiles;
 	gameFiles.resize(needRoms); // all NULL
-
-	std::string outPathStr;
-	outPathStr.assign(outBase).append(gameName, gameNameX - gameName);
-	if (outPathStr.length() < 5 || ((&outPathStr.back())[-3] != '.' && (&outPathStr.back())[-4] != '.')) outPathStr.append(".zip");
-	if (isFix) outPathStr.append(".fix");
-	const char *outPath = outPathStr.c_str(), *ext3, *ext4; size_t outPathLen = outPathStr.length();
-	PathGetExt(outPath, outPathLen - (isFix ? 4 : 0), ext3, ext4);
 
 	Bit32u r, matches = 0;
 	bool closeInfoSection = false;
@@ -2721,10 +2728,10 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	}
 
 	bool res = (matches == needRoms);
-	if (!res) { if (logPartialMatch) Log("Unable to build %.*s\n\n", (int)(gameNameX - gameName), gameName); }
+	if (!res) { if (logPartialMatch) Log("  Unable to build %.*s\n\n", (int)(gameNameX - gameName), gameName); }
 	else
 	{
-		if (!isFix) Log("  --> Writing output %s ...\n", outPath);
+		if (!isFix) Log("  Writing output %s ...\n", outPath);
 		SFile::Writer *w = (SFileIso::UsesExtension(ext3, true) ? (SFile::Writer*)new SFileIso::IsoWriter(outPath, ext3) : new SFileZip::ZipWriter(outPath));
 		if (w->failed) LogErr("  ERROR: Could not open output file %s\n\n", outPath);
 		for (r = 0, p = pGameInner; !w->failed && p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x)) != NULL; p = pNext)
@@ -2772,19 +2779,20 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	return res;
 }
 
-static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, std::vector<SFile*>& workFiles, bool fixMode = false, bool crcOnlyCheck = false, char** pGameEn = NULL)
+static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, bool fixMode, bool crcOnlyCheck, char** pGameEn, bool* notFound)
 {
 	XMLInlineStringConvert(gameName, gameNameX);
 	workPath.assign(outBase).append(gameName, gameNameX - gameName);
 	if (workPath.length() < 5 || ((&workPath.back())[-3] != '.' && (&workPath.back())[-4] != '.')) workPath.append(".zip");
 	SFileRaw gameFi(workPath, false);
-	if (!gameFi.size) return false;
+	if (!gameFi.size) { if (notFound) *notFound = true; return false; }
 
 	bool isISO = false;
 	const char *gameFiPath = gameFi.path.c_str(), *ext3, *ext4;
 	PathGetExt(gameFiPath, gameFi.path.length(), ext3, ext4);
-	if (SFileIso::UsesExtension(ext3, true) && SFileIso::IndexFiles(gameFi, workFiles)) isISO = true;
-	else if (!SFileZip::IndexFiles(gameFi, workFiles)) { LogErr("Invalid game file %s (not a ZIP file)\n", gameFiPath); return false; }
+	std::vector<SFile*> gameFiles;
+	if (SFileIso::UsesExtension(ext3, true) && SFileIso::IndexFiles(gameFi, gameFiles)) isISO = true;
+	else if (!SFileZip::IndexFiles(gameFi, gameFiles)) { LogErr("Invalid game file %s (not a ZIP file)\n", gameFiPath); return false; }
 
 	Log("Verifying game %s ...\n", gameFiPath);
 	unsigned romBasePathLen = (unsigned)gameFi.path.length() + 1, romTotal = 0, romCorrect = 0, romUnfixable = 0, romSuperflous = 0;
@@ -2814,7 +2822,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 			*romDateX = romDate[-1]; // undo null terminate
 		}
 		XMLInlineStringConvert(romName, romNameX);
-		for (SFile* fi : workFiles)
+		for (SFile* fi : gameFiles)
 		{
 			if ((size_t)(romNameX - romName) != (size_t)(fi->path.length() - romBasePathLen)) continue;
 			if (memcmp(romName, fi->path.c_str() + romBasePathLen, (romNameX - romName))) continue;
@@ -2829,7 +2837,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 		}
 
 		if (!matchFile)
-			for (SFile* fi : workFiles)
+			for (SFile* fi : gameFiles)
 			{
 				if ((matchSize = (size == fi->size)) == false) continue;
 				if ((matchCrc32 = (fi->GetCRC32() == (Bit32u)atoi64(romCrc, 0x10))) == false) continue;
@@ -2840,7 +2848,6 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 				matchTime = (ztime == fi->time);
 				break;
 			}
-
 
 		romTotal++;
 		if (matchName && matchSha1 && matchDate && matchTime) { romCorrect++; continue; }
@@ -2873,10 +2880,10 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 	}
 	if (p != pGameInner && pGameEn) *pGameEn = p;
 
-	for (SFile* fi : workFiles)
+	for (SFile* fi : gameFiles)
 	{
 		// Check IsContainedBy to ignore auxiliary files like CUE sheet track binaries
-		if (fi->was_matched || !fi->IsContainedBy(gameFiPath, gameFi.path.length()) || (isISO && SFileIso::ValidSuperflous(workFiles, fi))) continue;
+		if (fi->was_matched || !fi->IsContainedBy(gameFiPath, gameFi.path.length()) || (isISO && SFileIso::ValidSuperflous(gameFiles, fi))) continue;
 		Log("  Unnecessary rom '%.*s' exists in game file\n", (int)(fi->path.length() - romBasePathLen), fi->path.c_str() + romBasePathLen);
 		romSuperflous++;
 	}
@@ -2885,7 +2892,7 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 	if (romCorrect == romTotal && !romSuperflous)
 		Log("  [OK] Correctly matched all %u roms\n\n", romCorrect);
 	else if (romUnfixable)
-		Log("  [ERROR] Matched %u of %u roms - Automatic fix not available, there are %d missing roms%s\n\n", romCorrect, romTotal, romUnfixable, (strncasecmp((&gameFi.path.back()) - 3, ".ZIP", 4) ? "\n          Rename to .ZIP and run without -v / -f to rebuild game with additional source files" : ""));
+		Log("  [ERROR] Matched %u of %u roms - Automatic fix not available, there are %d missing roms%s\n\n", romCorrect, romTotal, romUnfixable, (strncasecmp((&gameFi.path.back()) - 3, ".ZIP", 4) ? "\n         Run with -r to rebuild from scratch or rename to .ZIP and run without -v / -f to rebuild game with additional source files" : ""));
 	else if (!fixMode && romSuperflous)
 		Log("  [ERROR] Matched %u of %u roms and there are %u unnecessary extra files%s\n\n", romCorrect, romTotal, romSuperflous, " - Run program with -f instead of -v to fix game");
 	else if (!fixMode)
@@ -2893,14 +2900,11 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 	else
 	{
 		Log("  Matched %u of %u roms - Rebuilding fixed game ...\n", romCorrect, romTotal);
-		if ((wasFixed = BuildRom(pGameInner, gameName, gameNameX, outBase, workFiles, true, true)) == true)
+		if ((wasFixed = BuildRom(pGameInner, gameName, gameNameX, outBase, workPath, gameFiles, true, true)) == true)
 			Log("  [OK] Game has been fixed\n\n");
 		else
 			Log("  [ERROR] Error while building fixed game\n\n");
 	}
-
-	for (size_t i = workFiles.size(); i--;) delete workFiles[i]; // delete backwards to delete contained files before their container
-	workFiles.clear();
 
 	if (wasFixed)
 	{
@@ -2909,12 +2913,14 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 		unlink(gameFiPath);
 		rename(workPath.assign(gameFi.path).append(".fix").c_str(), gameFiPath);
 	}
-	return true;
+
+	for (size_t i = gameFiles.size(); i--;) delete gameFiles[i]; // delete backwards to delete contained files before their container
+	return ((romCorrect == romTotal && !romSuperflous) || wasFixed);
 }
 
 int main(int argc, char *argv[])
 {
-	const char *xmlPath = NULL, *srcPath = NULL, *outPath = NULL, *useSrcDates = NULL, *onlyFullMatch = NULL, *verifyMode = NULL, *fixMode = NULL, *crcOnlyCheck = NULL, *noQuitConfirm = NULL;
+	const char *xmlPath = NULL, *srcPath = NULL, *outPath = NULL, *useSrcDates = NULL, *onlyFullMatch = NULL, *rebuild = NULL, *verifyMode = NULL, *fixMode = NULL, *crcOnlyCheck = NULL, *noQuitConfirm = NULL;
 	for (int i = 1; i < argc; i++)
 	{
 		if ((argv[i][0] != '-' && argv[i][0] != '/') || !argv[i][1] || argv[i][2]) goto argerr;
@@ -2925,6 +2931,7 @@ int main(int argc, char *argv[])
 			case 'o': if (outPath || ++i == argc) goto argerr; outPath       = argv[i]; continue;
 			case 'd': if (useSrcDates           ) goto argerr; useSrcDates   = argv[i]; continue;
 			case 'p': if (onlyFullMatch         ) goto argerr; onlyFullMatch = argv[i]; continue;
+			case 'r': if (rebuild               ) goto argerr; rebuild       = argv[i]; continue;
 			case 'v': if (verifyMode            ) goto argerr; verifyMode    = argv[i]; continue;
 			case 'f': if (fixMode               ) goto argerr; fixMode       = argv[i]; continue;
 			case 'c': if (crcOnlyCheck          ) goto argerr; crcOnlyCheck  = argv[i]; continue;
@@ -2941,7 +2948,8 @@ int main(int argc, char *argv[])
 			"  -o <PATH>  : Path to output file directory (defaults to XML file or current directory)\n"
 			"  -d         : Use date/time stamps in source instead of XML\n"
 			"  -p         : Don't report build failure with only a partial match\n"
-			"  -v         : Verify existing files in output file directory\n"
+			"  -r         : Force rebuild output files (otherwise validate existing)\n"
+			"  -v         : Only verify existing files in output file directory\n"
 			"  -f         : Fix meta data in existing files that fail verification\n"
 			"  -c         : Use fast CRC only check for verification and fixing\n"
 			"  -q         : Don't ask for pressing a key at the end\n"
@@ -2991,27 +2999,25 @@ int main(int argc, char *argv[])
 	const char *xmlPathEnd = xmlPath + (useStdin ? 0 : strlen(xmlPath));
 	while (xmlPathEnd != xmlPath && *xmlPathEnd != '/' && *xmlPathEnd != '\\') xmlPathEnd--;
 
-	std::string outBase;
+	std::string outBase, workPath;
 	(((outPath || xmlPathEnd == xmlPath) ? outBase.assign(outPath ? outPath : ".") : outBase.assign(xmlPath, (xmlPathEnd - xmlPath))) += '/');
 
 	if (verifyMode || fixMode)
 	{
 		Log("%sing games in output path %s%s...\n\n", (fixMode ? "Fix" : "Verify"), (outPath ? outPath : ""), (crcOnlyCheck ? " (quick CRC32 only check)" : " (full SHA1 data verification)"));
 
-		std::string workPath;
-		std::vector<SFile*> workFiles;
 		EXml x;
 		char *firstGameName = NULL, *firstGameNameX = NULL;
-		bool lastResult = true, haveMultipleGames = false;
+		bool haveMultipleGames = false, notFound = false;
 		for  (char* pGame = &xml[0], *pGameEn = NULL; (x = XMLParse(pGame, pGameEn)) != XML_END; pGame = pGameEn)
 		{
 			char *gameName, *gameNameX;
 			if (x == XML_TEXT || x == XML_ELEM_END || !XMLMatchTag(pGame, pGameEn, (pGame[1] == 'g' ? "game" : "machine"), (pGame[1] == 'g' ? 4 : 7), "name", &gameName, &gameNameX, NULL) || x == XML_ELEM_SOLO) continue;
 			if (!haveMultipleGames) { if (!firstGameName) { firstGameName = gameName; firstGameNameX = gameNameX; } else { haveMultipleGames = true; } }
 
-			lastResult = VerifyGame(pGameEn, gameName, gameNameX, outBase, workPath, workFiles, !!fixMode, !!crcOnlyCheck, &pGameEn);
+			VerifyGame(pGameEn, gameName, gameNameX, outBase, workPath, !!fixMode, !!crcOnlyCheck, &pGameEn, &notFound);
 		}
-		if (!haveMultipleGames && firstGameName && !lastResult) 
+		if (!haveMultipleGames && firstGameName && notFound) 
 			Log("Failed to locate %.*s to %s!\n\n", (int)(firstGameNameX - firstGameName), firstGameName, (fixMode ? "fix" : "verify"));
 	}
 	else
@@ -3046,7 +3052,7 @@ int main(int argc, char *argv[])
 		#endif
 
 		EXml x;
-		bool firstGame = true, onlyOneGame = false, bUseSrcDates = !!useSrcDates, bLogPartialMatch = !onlyFullMatch;
+		bool firstGame = true, onlyOneGame = false, bUseSrcDates = !!useSrcDates, bLogPartialMatch = !onlyFullMatch, verifyExisting = !rebuild;
 		for (char* pGame = &xml[0], *pGameEn = NULL; (x = XMLParse(pGame, pGameEn)) != XML_END; pGame = pGameEn)
 		{
 			char *gameName, *gameNameX;
@@ -3057,7 +3063,7 @@ int main(int argc, char *argv[])
 				firstGame = false;
 				onlyOneGame = !strstr(pGameEn, "<game ") && !strstr(pGameEn, "<machine ");
 			}
-			BuildRom(pGameEn, gameName, gameNameX, outBase, files, false, onlyOneGame, bUseSrcDates, bLogPartialMatch, &pGameEn);
+			BuildRom(pGameEn, gameName, gameNameX, outBase, workPath, files, false, onlyOneGame, bUseSrcDates, bLogPartialMatch, verifyExisting, &pGameEn);
 			if (pGameEn[0] != '<' || pGameEn[1] != '/' || pGameEn[2] != pGame[1] || pGameEn[3] != pGame[2]) { LogErr("Invalid XML near\n----------------------------\n%.*s\n----------------------------\n%.*s\n----------------------------\n", 200, pGame, 200, pGameEn); break; }
 		}
 
