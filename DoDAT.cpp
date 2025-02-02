@@ -182,6 +182,13 @@ struct SHA1_CTX
 #define ZIP_READ_LE64(p) ((Bit64u)(((const Bit8u *)(p))[0]) | ((Bit64u)(((const Bit8u *)(p))[1]) << 8U) | ((Bit64u)(((const Bit8u *)(p))[2]) << 16U) | ((Bit64u)(((const Bit8u *)(p))[3]) << 24U) | ((Bit64u)(((const Bit8u *)(p))[4]) << 32U) | ((Bit64u)(((const Bit8u *)(p))[5]) << 40U) | ((Bit64u)(((const Bit8u *)(p))[6]) << 48U) | ((Bit64u)(((const Bit8u *)(p))[7]) << 56U))
 #define ZIP_READ_BE32(p) ((Bit32u)((((const Bit8u *)(p))[0] << 24) | (((const Bit8u *)(p))[1] << 16) | (((const Bit8u *)(p))[2] << 8) | ((const Bit8u *)(p))[3]))
 #define ZIP_READ_BE64(p) ((Bit64u)((((Bit64u)((const Bit8u *)(p))[0] << 56) | ((Bit64u)((const Bit8u *)(p))[1] << 48) | ((Bit64u)((const Bit8u *)(p))[2] << 40) | ((Bit64u)((const Bit8u *)(p))[3] << 32) | ((Bit64u)((const Bit8u *)(p))[4] << 24) | ((Bit64u)((const Bit8u *)(p))[5] << 16) | ((Bit64u)((const Bit8u *)(p))[6] << 8) | (Bit64u)((const Bit8u *)(p))[7])))
+#define ZIP_WRITE_LE16(b,v) { (b)[0] = (Bit8u)((Bit16u)(v)); (b)[1] = (Bit8u)((Bit16u)(v) >> 8); }
+#define ZIP_WRITE_BE16(b,v) { (b)[0] = (Bit8u)((Bit16u)(v) >> 8); (b)[1] = (Bit8u)((Bit16u)(v)); }
+#define ZIP_WRITE_LB16(b,v) { ZIP_WRITE_LE16(b,v) ZIP_WRITE_BE16((b+2),v) }
+#define ZIP_WRITE_LE32(b,v) { (b)[0] = (Bit8u)((Bit32u)(v)); (b)[1] = (Bit8u)(((Bit32u)(v) >> 8)); (b)[2] = (Bit8u)(((Bit32u)(v) >> 16)); (b)[3] = (Bit8u)((Bit32u)(v) >> 24); }
+#define ZIP_WRITE_BE32(b,v) { (b)[0] = (Bit8u)((Bit32u)(v) >> 24); (b)[1] = (Bit8u)(((Bit32u)(v) >> 16)); (b)[2] = (Bit8u)(((Bit32u)(v) >> 8)); (b)[3] = (Bit8u)((Bit32u)(v)); }
+#define ZIP_WRITE_BE64(b,v) { (b)[0] = (Bit8u)((Bit64u)(v) >> 56); (b)[1] = (Bit8u)((Bit64u)(v) >> 48); (b)[2] = (Bit8u)((Bit64u)(v) >> 40); (b)[3] = (Bit8u)((Bit64u)(v) << 32); (b)[4] = (Bit8u)((Bit64u)(v) >> 24); (b)[5] = (Bit8u)((Bit64u)(v) >> 16); (b)[6] = (Bit8u)((Bit64u)(v) >> 8); (b)[7] = (Bit8u)(Bit64u)(v); }
+#define ZIP_WRITE_LB32(b,v) { ZIP_WRITE_LE32(b,v) ZIP_WRITE_BE32((b+4),v) }
 #define ZIP_PACKDATE(year,mon,day) (Bit16u)((((year)-1980)&0x7f)<<9 | ((mon)&0x3f) << 5 | ((day)&0x1f))
 #define ZIP_PACKTIME(hour,min,sec) (Bit16u)(((hour)&0x1f)<<11 | ((min)&0x3f) << 5 | (((sec)/2)&0x1f))
 
@@ -260,6 +267,12 @@ static bool hextouint8(const char* hex, Bit8u* res, int len)
 		if ((b = ((i1<<4) | i2)) < 0) return false;
 	}
 	return true;
+}
+
+static void PathGetExt(const char* path, size_t len, const char*& ext3, const char*& ext4)
+{
+	ext3 = (len > 4 && path[len - 4] == '.' ? path + len - 3 : NULL);
+	ext4 = (!ext3 && len > 5 && path[len - 5] == '.' ? path + len - 4 : NULL);
 }
 
 enum EXml { XML_END = 0, XML_ELEM_START, XML_ELEM_END, XML_ELEM_SOLO, XML_TEXT };
@@ -354,7 +367,8 @@ static void XMLInlineStringConvert(char* pStart, char*& pEnd)
 		else if (!strncmp(p, "lt;", 3)) { p[-1] = '<'; pIn += 3; }
 		else if (!strncmp(p, "gt;", 3)) { p[-1] = '>'; pIn += 3; }
 	pEnd = p;
-	for (*(p++) = *(pLast++); p != pLast;) *(p++) = ' ';
+	if (p != pLast && *pLast != '<') *(p++) = *(pLast++); // move over the string closing ' or ", then fill spaces afterwards
+	for (; p != pLast;) *(p++) = ' '; // fill with spaces to keep XML valid (unless < or > were inserted...)
 }
 
 struct SFile
@@ -401,21 +415,27 @@ struct SFile
 		have_sha1 = true;
 		return sha1;
 	}
-	size_t PathMatch(const char* rom, size_t len)
+	size_t PathMatch(const char* rom, size_t len) const // non-case sensitive, slash char agnostic
 	{
 		const char *pBegin = path.c_str(), *pEnd = pBegin + path.length(), *p = pEnd, *r = rom + len;
-		while (p != pBegin && r != rom) { char a = *(--r), b = *(--p); if ((a>='A'&&a<='Z'?(a|0x20):a=='\\'?'/':a) != (b>='A'&&b<='Z'?(b|0x20):b=='\\'?'/':b)) { p++; break; } }
+		while (p != pBegin && r != rom) { char a = *(--r), b = *(--p); if (((a>='A'&&a<='Z')?(a|0x20):a=='\\'?'/':a) != ((b>='A'&&b<='Z')?(b|0x20):b=='\\'?'/':b)) { p++; break; } }
 		return (size_t)(pEnd - p);
 	}
-	bool Contains(const char* child_path)
+	bool IsContainedBy(const char* parent_path, size_t len) const // non-case sensitive, slash char agnostic
 	{
-		for (char *pa = (char*)path.c_str(), *pb = (char*)child_path, a, b;;)
-		{
-			if ((a = *(pa++)) == (b = *(pb++))) { if (!a) { return false; } continue; }
-			if (!b && a == '/') return true; // containers always use / between real file and contained file
-			if (((a >= 'A' && a <= 'Z') ? (a|0x20) : a == '\\' ? '/' : a) != ((b >= 'A' && b <= 'Z') ? (b|0x20) : b == '\\' ? '/' : b)) return false;
-		}
+		const char *pa = path.c_str(), *pb = parent_path;
+		if (path.length() <= len || (pa[len] != '/' && pa[len] != '\\')) return false;
+		for (;;) { char a = *(pa++), b = *(pb++); if (!b) return true; if (((a>='A'&&a<='Z')?(a|0x20):a=='\\'?'/':a) != ((b>='A'&&b<='Z')?(b|0x20):b=='\\'?'/':b)) return false; }
 	}
+
+	struct Writer
+	{
+		FILE* f; bool failed;
+		Writer(const char* path) : f(fopen_utf8(path, "wb")), failed(f == NULL) { }
+		~Writer() { if (f) fclose(f); }
+		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false) = 0;
+		virtual bool Finalize(char* XmlGameInner) = 0;
+	};
 };
 
 struct SFileRaw : SFile
@@ -739,6 +759,11 @@ struct SFileZip : SFileMemory
 	enum { METHOD_STORED = 0, METHOD_SHRUNK = 1, METHOD_IMPLODED = 6, METHOD_DEFLATED = 8 };
 	static bool MethodSupported(Bit32u method) { return (method == METHOD_DEFLATED || method == METHOD_STORED || method == METHOD_SHRUNK || method == METHOD_IMPLODED); }
 
+	static bool UsesExtension(const char* ext3, const char* ext4, bool as_output)
+	{
+		return (ext3 && !strncasecmp(ext3, "ZIP", 3)) || (ext4 && (!strncasecmp(ext4, "DOSC", 4) || (as_output && !strncasecmp(ext4, "DOSZ", 4))));
+	}
+
 	static bool IndexFiles(SFile& fi, std::vector<SFile*>& files)
 	{
 		// Basic sanity checks - reject files which are too small.
@@ -869,30 +894,19 @@ struct SFileZip : SFileMemory
 		return true;
 	}
 
-	struct Writer
+	struct ZipWriter : SFile::Writer
 	{
-		FILE* f;
 		Bit32u local_file_offset;
 		Bit16u file_count;
-		bool failed;
 		std::vector<Bit8u> central_dir;
 
-		Writer(const char* path)
-		{
-			local_file_offset = 0;
-			file_count = 0;
-			f = fopen_utf8(path, "wb");
-			failed = (f == NULL);
-		}
+		ZipWriter(const char* path) : SFile::Writer(path), local_file_offset(0), file_count(0) { }
 
-		#define ZIP_WRITE_LE16(b,v) { (b)[0] = (Bit8u)((Bit16u)(v) & 0xFF); (b)[1] = (Bit8u)((Bit16u)(v) >> 8); }
-		#define ZIP_WRITE_LE32(b,v) { (b)[0] = (Bit8u)((Bit32u)(v) & 0xFF); (b)[1] = (Bit8u)(((Bit32u)(v) >> 8) & 0xFF); (b)[2] = (Bit8u)(((Bit32u)(v) >> 16) & 0xFF); (b)[3] = (Bit8u)((Bit32u)(v) >> 24); }
-
-		void WriteFile(const char* inzippath, bool is_dir, Bit32u wsize, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false)
+		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false)
 		{
 			//if (1) { if (is_dir) return; } // force skip directory entries
-			Bit16u inpathLen = (Bit16u)strlen(inzippath), pathLen = inpathLen + ((is_dir && inzippath[inpathLen - 1] != '/' && inzippath[inpathLen - 1] != '\\') ? 1 : 0), wmethod = METHOD_STORED;
-			Bit32u wcrc32 = 0, extAttr = (is_dir ? 0x10 : 0), compsize = 0;
+			Bit16u inpathLen = (Bit16u)strlen(innerpath), pathLen = inpathLen + ((is_dir && innerpath[inpathLen - 1] != '/' && innerpath[inpathLen - 1] != '\\') ? 1 : 0), wmethod = METHOD_STORED;
+			Bit32u wsize = (fsrc ? (Bit32u)fsrc->size : (Bit32u)0), wcrc32 = 0, extAttr = (is_dir ? 0x10 : 0), compsize = 0;
 			static Bit8u s_outbuf[1024 * 512], s_inbuf[1024 * 512];
 
 			if (is_dir || !wsize || !fsrc) { ZIP_ASSERT(!wsize); wsize = 0; }
@@ -941,7 +955,7 @@ struct SFileZip : SFileMemory
 
 				// Compression.
 				bool wasOpen = fsrc->IsOpen();
-				if (wasOpen) fsrc->Seek(0); else fsrc->Open();
+				if (wasOpen) fsrc->Seek(0); else if (!fsrc->Open()) { failed = true; return; }
 				for (;;)
 				{
 					if (!avail_in && src_remain)
@@ -1009,7 +1023,7 @@ struct SFileZip : SFileMemory
 			ZIP_WRITE_LE16(wbuf+28, 0);          // Extra field length
 
 			//File name (with \ changed to /)
-			for (char* pIn = (char*)inzippath, *pOut = (char*)(wbuf+30); *pIn; pIn++, pOut++)
+			for (char* pIn = (char*)innerpath, *pOut = (char*)(wbuf+30); *pIn; pIn++, pOut++)
 				*pOut = (*pIn == '\\' ? '/' : *pIn);
 			//if (1) { for (char *pP = (char*)buf+30, *pE = pP + pathLen; pP != pE; pP++) if (*pP >= 'a' && *pP <= 'z') (*pP) -= 0x20; } // force upper case names
 			if (pathLen != inpathLen)
@@ -1024,22 +1038,22 @@ struct SFileZip : SFileMemory
 
 			ZIP_WRITE_LE32(cd+0, 0x02014b50);         // Central directory file header signature
 			ZIP_WRITE_LE16(cd+4, 0);                  // Version made by (0 = DOS)
-			memcpy(cd+6, wbuf+4, 26);                  // copy middle section shared with local file header
+			memcpy(cd+6, wbuf+4, 26);                 // Copy middle section shared with local file header
 			ZIP_WRITE_LE16(cd+32, 0);                 // File comment length
 			ZIP_WRITE_LE16(cd+34, 0);                 // Disk number where file starts
 			ZIP_WRITE_LE16(cd+36, 0);                 // Internal file attributes
 			ZIP_WRITE_LE32(cd+38, extAttr);           // External file attributes
 			ZIP_WRITE_LE32(cd+42, local_file_offset); // Relative offset of local file header
-			memcpy(cd + 46, wbuf + 30, pathLen);       // File name
+			memcpy(cd + 46, wbuf + 30, pathLen);      // File name
 
 			local_file_offset += 30 + pathLen + compsize;
 			file_count++;
 		}
 
-		void Finalize()
+		virtual bool Finalize(char* XmlGameInner)
 		{
-			if (file_count)
-				failed |= !fwrite(&central_dir[0], central_dir.size(), 1, f);
+			if (failed) return false;
+			if (file_count) failed |= !fwrite(&central_dir[0], central_dir.size(), 1, f);
 			Bit8u eocd[22];
 			ZIP_WRITE_LE32(eocd+ 0, 0x06054b50);                 // End of central directory signature
 			ZIP_WRITE_LE16(eocd+ 4, 0);                          // Number of this disk
@@ -1050,16 +1064,19 @@ struct SFileZip : SFileMemory
 			ZIP_WRITE_LE32(eocd+16, local_file_offset);          // Offset of start of central directory, relative to start of archive
 			ZIP_WRITE_LE16(eocd+20, 0);                          // Comment length (n)
 			failed |= !fwrite(eocd, 22, 1, f);
-			fclose(f);
+			return !failed;
 		}
-
-		#undef ZIP_WRITE_LE16
-		#undef ZIP_WRITE_LE32
 	};
 };
 
 struct SFileIso : SFile
 {
+	enum { RAW_SECTOR_SIZE = 2352, COOKED_SECTOR_SIZE = 2048, ISO_FIRST_VD = 16, CD_FPS = 75, ISO_ASSOCIATED = 4, ISO_DIRECTORY = 2, ISO_HIDDEN = 1 };
+	enum { CD_MAX_SUBCODE_DATA = 96, CD_FRAME_SIZE = RAW_SECTOR_SIZE + CD_MAX_SUBCODE_DATA, ISO_FRAMESIZE = 2048 };
+	enum { CHD_V5_HEADER_SIZE = 124, CHD_V5_UNCOMPMAPENTRYBYTES = 4, CHD_METADATA_HEADER_SIZE = 16, CHD_CDROM_TRACK_METADATA_TAG = 1128813650, CHD_CDROM_TRACK_METADATA2_TAG = 1128813618 };
+	enum { CHD_UNITBYTES = CD_FRAME_SIZE, CHD_HUNKBYTES = CHD_UNITBYTES * 8, CHD_CD_TRACK_PADDING = 4 };
+	struct BuiltTrack { std::vector<Bit8u> buf; int data_size, pregap, omitted_pregap; char ttype[16]; };
+
 	struct IsoReader
 	{
 		// BASED ON cdrom_image.cpp of DOSBox (GPL2)
@@ -1072,8 +1089,6 @@ struct SFileIso : SFile
 		SFile& src; Bit32u refs;
 		void AddRef() { refs++; }
 		void DelRef() { ZIP_ASSERT(refs); if (!--refs) delete this; }
-
-		enum { RAW_SECTOR_SIZE = 2352, CD_MAX_SECTOR_DATA = 2352, CD_MAX_SUBCODE_DATA = 96, CD_FRAME_SIZE = CD_MAX_SECTOR_DATA + CD_MAX_SUBCODE_DATA, COOKED_SECTOR_SIZE = 2048, ISO_FRAMESIZE = 2048, CD_FPS = 75, ISO_FIRST_VD = 16, ISO_ASSOCIATED = 4, ISO_DIRECTORY = 2, ISO_HIDDEN = 1 };
 
 		ChdState *chd;
 		std::vector<IsoReader::Track> tracks;
@@ -1118,14 +1133,13 @@ struct SFileIso : SFile
 			return cache + insecofs;
 		}
 
-		#define ISO_FRAMES_TO_MSF(f, M,S,F) { int value = f; *(F) = value%CD_FPS; value /= CD_FPS; *(S) = value%60; value /= 60; *(M) = value; }
 		#define ISO_MSF_TO_FRAMES(M, S, F)	((M)*60*CD_FPS+(S)*CD_FPS+(F))
 		#define ISO_IS_DIR(de) (((iso) ? (de)->fileFlags : (de)->timeZone) & ISO_DIRECTORY)
 
 		static bool CanReadPVD(SFile& fi, int sectorSize, bool mode2)
 		{
 			Bit8u pvd[COOKED_SECTOR_SIZE];
-			Bit32u seek = 16 * sectorSize;	// first vd is located at sector 16
+			Bit32u seek = ISO_FIRST_VD * sectorSize; // first vd is located at sector 16
 			if (sectorSize == RAW_SECTOR_SIZE && !mode2) seek += 16;
 			if (mode2) seek += 24;
 			// pvd[0] = descriptor type, pvd[1..5] = standard identifier, pvd[6] = iso version (+8 for High Sierra)
@@ -1292,8 +1306,14 @@ struct SFileIso : SFile
 
 					SFile* imgFile = NULL;
 					for (SFile* fil : files)
-						if (fil->path.length() == imgPathLen && !memcmp(&fil->path[0], imgPath, imgPathLen))
+						if (fil->path.length() == imgPathLen && !strncasecmp(&fil->path[0], imgPath, imgPathLen))
 							{ imgFile = fil; break; }
+					if (!imgFile)
+					{
+						imgFile = new SFileRaw(std::string(imgPath, imgPathLen), false);
+						if (!imgFile->size) { delete imgFile; imgFile = NULL; }
+						else files.push_back(imgFile);
+					}
 
 					if (!imgFile)
 					{
@@ -1324,13 +1344,6 @@ struct SFileIso : SFile
 			return true;
 		}
 
-		static Bit32u get_bigendian_uint32(const Bit8u* base) { return (base[0] << 24) | (base[1] << 16) | (base[2] << 8) | base[3]; }
-		static Bit64u get_bigendian_uint64(const Bit8u* base) { return ((Bit64u)base[0] << 56) | ((Bit64u)base[1] << 48) | ((Bit64u)base[2] << 40) | ((Bit64u)base[3] << 32) | ((Bit64u)base[4] << 24) | ((Bit64u)base[5] << 16) | ((Bit64u)base[6] << 8) | (Bit64u)base[7]; }
-		static void set_bigendian_uint32(Bit8u* base, Bit32u val) { base[0] = (Bit8u)(val >> 24); base[1] = (Bit8u)(val >> 16); base[2] = (Bit8u)(val >> 8); base[3] = (Bit8u)val; }
-		static void set_bigendian_uint64(Bit8u* base, Bit64u val) { base[0] = (Bit8u)(val >> 56); base[1] = (Bit8u)(val >> 48); base[2] = (Bit8u)(val >> 40); base[3] = (Bit8u)(val << 32); base[4] = (Bit8u)(val >> 24); base[5] = (Bit8u)(val >> 16); base[6] = (Bit8u)(val >> 8); base[7] = (Bit8u)val; }
-
-		enum { CHD_V5_HEADER_SIZE = 124, CHD_V5_UNCOMPMAPENTRYBYTES = 4, METADATA_HEADER_SIZE = 16, CDROM_TRACK_METADATA_TAG = 1128813650, CDROM_TRACK_METADATA2_TAG = 1128813618, CD_TRACK_PADDING = 4 };
-
 		static bool LoadCHD(SFile& fi, std::vector<Track>& tracks, ChdState*& chd)
 		{
 			tracks.clear();
@@ -1350,22 +1363,21 @@ struct SFileIso : SFile
 			if (fi.Seek(0) != 0 || !fi.Read(rawheader, CHD_V5_HEADER_SIZE) || memcmp(rawheader, "MComprHD", 8)) { not_chd = true; goto err; }
 
 			// Check supported version, flags and compression
-			Bit32u hdr_length = get_bigendian_uint32(&rawheader[8]);
-			Bit32u hdr_version = get_bigendian_uint32(&rawheader[12]);
+			Bit32u hdr_length = ZIP_READ_BE32(&rawheader[8]);
+			Bit32u hdr_version = ZIP_READ_BE32(&rawheader[12]);
 			if (hdr_version != 5 || hdr_length != CHD_V5_HEADER_SIZE) goto err; // only ver 5 is supported
-			if (get_bigendian_uint32(&rawheader[16])) goto err; // compression is not supported
+			if (ZIP_READ_BE32(&rawheader[16])) goto err; // compression is not supported
 
 			// Make sure it's a CD image
-			ZIP_STATIC_ASSERT(CD_MAX_SECTOR_DATA == RAW_SECTOR_SIZE);
-			Bit32u unitsize = get_bigendian_uint32(&rawheader[60]);
-			int hunkbytes = (int)get_bigendian_uint32(&rawheader[56]);
+			Bit32u unitsize = ZIP_READ_BE32(&rawheader[60]);
+			int hunkbytes = (int)ZIP_READ_BE32(&rawheader[56]);
 			if (unitsize != CD_FRAME_SIZE || (hunkbytes % CD_FRAME_SIZE) || !hunkbytes) goto err; // not CD sector size
 
 			// Read file offsets for hunk mapping and track meta data
 			Bit64u filelen = fi.size;
-			Bit64u logicalbytes = get_bigendian_uint64(&rawheader[32]);
-			Bit64u mapoffset = get_bigendian_uint64(&rawheader[40]);
-			Bit64u metaoffset = get_bigendian_uint64(&rawheader[48]);
+			Bit64u logicalbytes = ZIP_READ_BE64(&rawheader[32]);
+			Bit64u mapoffset = ZIP_READ_BE64(&rawheader[40]);
+			Bit64u metaoffset = ZIP_READ_BE64(&rawheader[48]);
 			if (mapoffset < CHD_V5_HEADER_SIZE || mapoffset >= filelen || metaoffset < CHD_V5_HEADER_SIZE || metaoffset >= filelen || !logicalbytes) goto err;
 
 			// Read track meta data
@@ -1375,18 +1387,18 @@ struct SFileIso : SFile
 			for (Bit64u metaentry_offset = metaoffset, metaentry_next; metaentry_offset != 0; metaentry_offset = metaentry_next)
 			{
 				char meta[256], mt_type[32], mt_subtype[32], mt_pgtype[32];
-				Bit8u raw_meta_header[METADATA_HEADER_SIZE];
-				if (fi.Seek(metaentry_offset) != metaentry_offset || !fi.Read(raw_meta_header, METADATA_HEADER_SIZE)) goto err;
-				Bit32u metaentry_metatag = get_bigendian_uint32(&raw_meta_header[0]);
-				Bit32u metaentry_length = (get_bigendian_uint32(&raw_meta_header[4]) & 0x00ffffff);
-				metaentry_next = get_bigendian_uint64(&raw_meta_header[8]);
-				if (metaentry_metatag != CDROM_TRACK_METADATA_TAG && metaentry_metatag != CDROM_TRACK_METADATA2_TAG) continue;
+				Bit8u raw_meta_header[CHD_METADATA_HEADER_SIZE];
+				if (fi.Seek(metaentry_offset) != metaentry_offset || !fi.Read(raw_meta_header, CHD_METADATA_HEADER_SIZE)) goto err;
+				Bit32u metaentry_metatag = ZIP_READ_BE32(&raw_meta_header[0]);
+				Bit32u metaentry_length = (ZIP_READ_BE32(&raw_meta_header[4]) & 0x00ffffff);
+				metaentry_next = ZIP_READ_BE64(&raw_meta_header[8]);
+				if (metaentry_metatag != CHD_CDROM_TRACK_METADATA_TAG && metaentry_metatag != CHD_CDROM_TRACK_METADATA2_TAG) continue;
 				if (!fi.Read((Bit8u*)meta, (int)(metaentry_length > sizeof(meta) ? sizeof(meta) : metaentry_length))) goto err;
 				//Log("%.*s\n", metaentry_length, meta);
 
 				int mt_track_no = 0, mt_frames = 0, mt_pregap = 0;
 				if (sscanf(meta,
-					(metaentry_metatag == CDROM_TRACK_METADATA2_TAG ? "TRACK:%d TYPE:%30s SUBTYPE:%30s FRAMES:%d PREGAP:%d PGTYPE:%30s" : "TRACK:%d TYPE:%30s SUBTYPE:%30s FRAMES:%d"),
+					(metaentry_metatag == CHD_CDROM_TRACK_METADATA2_TAG ? "TRACK:%d TYPE:%30s SUBTYPE:%30s FRAMES:%d PREGAP:%d PGTYPE:%30s" : "TRACK:%d TYPE:%30s SUBTYPE:%30s FRAMES:%d"),
 					&mt_track_no, mt_type, mt_subtype, &mt_frames, &mt_pregap, mt_pgtype) < 4) continue;
 
 				// Add CHD tracks without using AddTrack because it's much simpler, we also support an incoming unsorted track list
@@ -1420,7 +1432,7 @@ struct SFileIso : SFile
 
 			// Read hunk mapping and convert to file offsets
 			if (fi.Seek(mapoffset) != mapoffset || !fi.Read((Bit8u*)chd->hunkmap, hunkcount * CHD_V5_UNCOMPMAPENTRYBYTES)) goto err;
-			for (Bit32u i = 0; i != hunkcount; i++) chd->hunkmap[i] = get_bigendian_uint32((Bit8u*)&chd->hunkmap[i]) * hunkbytes;
+			for (Bit32u i = 0; i != hunkcount; i++) chd->hunkmap[i] = ZIP_READ_BE32((Bit8u*)&chd->hunkmap[i]) * hunkbytes;
 
 			// Now set physical start offsets for tracks and calculate CHD paddings. In CHD files tracks are padded to a to a 4-frame boundary.
 			// Thus we need to give ChdFile::read a means to figure out the padding that applies to the physical sector number it is reading.
@@ -1428,12 +1440,10 @@ struct SFileIso : SFile
 			{
 				tracks[t].start += tracks[t - 1].start + tracks[t - 1].frames; // include omitted pregap with +=
 				if (t == trackcount) break; // leadout only needs start
-				tracks[t].skip = (((Bit32u)(tracks[t-1].skip / CD_FRAME_SIZE) + tracks[t-1].frames + (CD_TRACK_PADDING - 1)) / CD_TRACK_PADDING * CD_TRACK_PADDING) * CD_FRAME_SIZE;
+				tracks[t].skip = (((Bit32u)(tracks[t-1].skip / CD_FRAME_SIZE) + tracks[t-1].frames + (CHD_CD_TRACK_PADDING - 1)) / CHD_CD_TRACK_PADDING * CHD_CD_TRACK_PADDING) * CD_FRAME_SIZE;
 			}
 			return true;
 		}
-
-		struct BuiltTrack { std::vector<Bit8u> buf; int data_size, pregap, omitted_pregap; char ttype[16]; };
 
 		bool TestOrFillTrackBuf(std::vector<BuiltTrack*>* builtTracks, int number, int frames, int data_size, const char* ttype, const char* ttypeX, int pregap, int omitted_pregap, int in_zeros, int out_zeros, const char* chdTrackSha1)
 		{
@@ -1492,173 +1502,6 @@ struct SFileIso : SFile
 				sprintf(pBT->ttype, "%.*s", ZIP_MIN((int)(ttypeX - ttype), (int)15), ttype);
 				return true;
 			}
-			return false;
-		}
-
-		static SFile* BuildCHDFromTracks(std::vector<BuiltTrack*>& builtTracks, Bit64u chdRomSize, const char* chdRomSha1)
-		{
-			for (BuiltTrack* bt : builtTracks) if (!bt) return NULL;
-
-			Bit32u totalunits = 0;
-			for (BuiltTrack* bt : builtTracks)
-			{
-				totalunits += (Bit32u)(bt->buf.size() / bt->data_size);
-				totalunits = (totalunits + (CD_TRACK_PADDING - 1)) / CD_TRACK_PADDING * CD_TRACK_PADDING;
-			}
-			const Bit32u totalunmappedhunks = (totalunits + 7) / 8;
-
-			enum { UNITBYTES = CD_FRAME_SIZE, HUNKBYTES = UNITBYTES * 8 };
-			static const Bit8u zeroedHunkSha1[20] { 0x32, 0x6b, 0xf7, 0xa9, 0x91, 0x84, 0x0c, 0x66, 0x90, 0x49, 0x00, 0xcd, 0x96, 0x89, 0xf5, 0x89, 0xf4, 0x73, 0x10, 0xfa }; // sha1 of HUNKBYTES zero bytes
-
-			Bit64u chdMaxSize = // uncompressed chd file structure
-				CHD_V5_HEADER_SIZE // 124 bytes header
-				+ (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES) // hunk map (4 bytes index, can't be 0 because 0 is the hunk with headers and hunkmap and meta info)
-				+ ((METADATA_HEADER_SIZE + 256) * builtTracks.size() + HUNKBYTES) // track meta array, zeros until next hunk boundry
-				+ (totalunmappedhunks * HUNKBYTES); // first actual hunk (index is fileoffset / hunksize), all hunks until last, then eof (must be at hunk boundry)
-			SFileMemory* res = new SFileMemory(chdMaxSize);
-			Bit8u *rawheader = res->buf, *hunkmap = rawheader + CHD_V5_HEADER_SIZE, *meta = hunkmap + (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES);
-
-			memcpy(&rawheader[0], "MComprHD", 8);
-			set_bigendian_uint32(&rawheader[8], CHD_V5_HEADER_SIZE);
-			set_bigendian_uint32(&rawheader[12], 5);
-			memset(&rawheader[16], 0, 32 - 16);
-			set_bigendian_uint64(&rawheader[32], totalunits * UNITBYTES);
-			set_bigendian_uint64(&rawheader[40], CHD_V5_HEADER_SIZE); // mapoffset
-			set_bigendian_uint64(&rawheader[48], (Bit64u)(meta - rawheader)); //should be (mapoffset + hunkcount * 4) where hunkcount is ((logicalbytes + hunkbytes - 1) / hunkbytes)
-			set_bigendian_uint32(&rawheader[56], HUNKBYTES); // hunkbytes (8 units)
-			set_bigendian_uint32(&rawheader[60], UNITBYTES); // unitbytes
-			memset(&rawheader[64], 0, CHD_V5_HEADER_SIZE - 64);
-
-			int tnum = 1;
-			for (BuiltTrack* bt : builtTracks)
-			{
-				int len = sprintf((char*)meta + METADATA_HEADER_SIZE, "TRACK:%d TYPE:%s SUBTYPE:%s FRAMES:%d PREGAP:%d PGTYPE:%s%s PGSUB:%s POSTGAP:%d",
-					tnum++, bt->ttype, "NONE", (int)(bt->buf.size() / bt->data_size), (bt->pregap ? bt->pregap : bt->omitted_pregap), (bt->pregap ? "V" : ""), (bt->pregap ? bt->ttype : "MODE1"), "NONE", 0);
-
-				Bit8u* metanext = meta + METADATA_HEADER_SIZE + len + 1;
-				set_bigendian_uint32(&meta[0], CDROM_TRACK_METADATA2_TAG);
-				set_bigendian_uint32(&meta[4], len + 1); // len of formatted string with \0 terminator
-				meta[4] = 0x1; // ALWAYS 0x01 (defined as CHD_MDFLAGS_CHECKSUM)
-				set_bigendian_uint64(&meta[8], (bt == builtTracks.back() ? 0 : (metanext - rawheader))); // offset from file start to next meta element, 0 for last element
-				meta = metanext;
-			}
-
-			struct Local
-			{
-				//// We could store only unique hunks as an optimization but chdman doesn't do this, so we also don't
-				//struct HunkHash { Bit32u next; Bit8u sha[20]; };
-				//HunkHash* hunkHashes;
-				//Bit32u hunkHashMap[256];
-				//Local(Bit32u headhunks, Bit32u totalunmappedhunks) { hunkHashes = (HunkHash*)malloc((headhunks + totalunmappedhunks) * sizeof(HunkHash)); memset(hunkHashMap, 0, sizeof(hunkHashMap)); }
-				//~Local() { free(hunkHashes); }
-				//Bit32u FindHunkIdx(Bit8u hunksha[20]) { for (Bit32u next = hunkHashMap[hunksha[0]]; next; next = hunkHashes[next].next) { if (!memcmp(hunksha, hunkHashes[next].sha, 20)) return next; } return 0; }
-				//void KeepHunkHash(Bit32u hunkidx, Bit8u hunksha[20]) { hunkHashes[hunkidx].next = hunkHashMap[hunksha[0]]; memcpy(hunkHashes[hunkidx].sha, hunksha, 20); hunkHashMap[hunksha[0]] = hunkidx; }
-
-				static void WriteHunk(Bit8u* temphunk, Bit32u& hunkcounter, Bit8u*& hunks, Bit8u*& hunkmap)
-				{
-					Bit8u hunksha[20];
-					SHA1_CTX::Run(temphunk, HUNKBYTES, hunksha);
-					Bit32u hunkidx = 0;
-					if (memcmp(hunksha, zeroedHunkSha1, 20) /*&& (hunkidx = FindHunkIdx(hunksha)) == 0*/)
-					{
-						hunkidx = hunkcounter++;
-						memcpy(hunks, temphunk, HUNKBYTES);
-						hunks += HUNKBYTES;
-						//KeepHunkHash(hunkidx, hunksha);
-					}
-					set_bigendian_uint32(hunkmap, hunkidx);
-					hunkmap += 4;
-				}
-			};
-
-			Bit8u *temphunk = (Bit8u*)malloc(HUNKBYTES), *hnk = temphunk;
-			Bit32u headhunks = (Bit32u)(((meta - rawheader) + (HUNKBYTES - 1)) / HUNKBYTES), hunkcounter = headhunks;
-			Bit8u* hunks = rawheader + headhunks * HUNKBYTES;
-			memset(meta, 0, (hunks - meta));
-
-			totalunits = 0;
-			for (BuiltTrack* bt : builtTracks)
-			{
-				const Bit32u btdsize = (Bit32u)bt->data_size, btunits = (Bit32u)(bt->buf.size() / btdsize);
-				const bool btaudio = !memcmp(bt->ttype, "AUDIO", 6);
-				for (Bit8u *p = &bt->buf[0], *pEnd = p + btdsize * btunits, clear = 8; p != pEnd; p += btdsize)
-				{
-					memcpy(hnk, p, btdsize);
-					if (clear) { memset(hnk + btdsize, 0, (UNITBYTES - btdsize)); clear--; }
-					if (btaudio) // CHD audio endian swap
-						for (Bit8u *a = hnk, *aEnd = a + RAW_SECTOR_SIZE, tmp; a < aEnd; a += 2)
-							{ tmp = a[0]; a[0] = a[1]; a[1] = tmp; }
-
-					hnk += UNITBYTES;
-					if (hnk == &temphunk[HUNKBYTES])
-					{
-						hnk = temphunk;
-						Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
-					}
-				}
-
-				for (totalunits += btunits; totalunits % CD_TRACK_PADDING; totalunits++)
-				{
-					memset(hnk, 0, UNITBYTES);
-					hnk += UNITBYTES;
-					if (hnk == &temphunk[HUNKBYTES])
-					{
-						hnk = temphunk;
-						Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
-					}
-				}
-			}
-			if (hnk != temphunk)
-			{
-				memset(hnk, 0, temphunk + HUNKBYTES - hnk);
-				if (Bit32u garbagehunkidx = ((hnk <= temphunk + HUNKBYTES / 2 && totalunmappedhunks > 256) ? get_bigendian_uint32(hunkmap - (256 * 4)) : 0))
-				{
-					// An unintended (but consistent) behavior of chdman can add garbage at the end of the final chunk from 256 hunks ago
-					memcpy(temphunk + HUNKBYTES / 2, rawheader + (garbagehunkidx * HUNKBYTES) + (HUNKBYTES / 2), HUNKBYTES / 2);
-				}
-				Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
-			}
-			ZIP_ASSERT(hunkmap == rawheader + CHD_V5_HEADER_SIZE + (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES));
-			free(temphunk);
-
-			res->size = (hunks - rawheader);
-
-			Bit8u chdRomSha1b[20];
-			if (res->size == chdRomSize && res->GetSHA1() && hextouint8(chdRomSha1, chdRomSha1b, 20) && !memcmp(chdRomSha1b, res->sha1, 20))
-				return res;
-
-			delete res;
-			return NULL;
-		}
-
-		static bool TestOrBuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize, const char* chdRomSha1, std::vector<BuiltTrack*>* builtTracks, SFile** builtFile)
-		{
-			SFileIso::IsoReader* lastReader = NULL;
-			for (SFile* fil : files)
-			{
-				if (fil->typ != SFile::T_ISO || lastReader == &((SFileIso*)fil)->reader) continue;
-				lastReader = &((SFileIso*)fil)->reader;
-
-				EXml x;
-				for (char *pT = pCHDRomOpenTagEnd, *pTEnd = pT; pT && (x = XMLParse(pT, pTEnd)) != XML_END && x != XML_ELEM_END; pT = pTEnd = XMLLevel(pTEnd, x))
-				{
-					char *trackNumber, *trackNumberX, *trackType, *trackTypeX, *trackFrames, *trackFramesX, *trackPregap, *trackPregapX, *trackOmittedPregap, *trackOmittedPregapX, *trackSize, *trackSizeX, *trackSha1, *trackSha1X, *trackInZeros, *trackInZerosX, *trackOutZeros, *trackOutZerosX;
-					if (!XMLMatchTag(pT, pTEnd, "track", 5, "number", &trackNumber, &trackNumberX, "type", &trackType, &trackTypeX, "frames", &trackFrames, &trackFramesX, "pregap", &trackPregap, &trackPregapX, "omitted_pregap", &trackOmittedPregap, &trackOmittedPregapX, "size", &trackSize, &trackSizeX, "sha1", &trackSha1, &trackSha1X, "in_zeros", &trackInZeros, &trackInZerosX, "out_zeros", &trackOutZeros, &trackOutZerosX, NULL)) continue;
-					Bit64u tSize = atoi64(trackSize), tFrames = atoi64(trackFrames);
-					if (!tFrames || (tSize % tFrames)) { ZIP_ASSERT(false); continue; }
-					int tNum = atoi(trackNumber), tDataSize = (int)(tSize / tFrames), tPregap = (trackPregap ? atoi(trackPregap) : 0), tOmittedPregap = (trackOmittedPregap ? atoi(trackOmittedPregap) : 0), tInZeros = (trackInZeros ? atoi(trackInZeros) : -1), tOutZeros = (trackOutZeros ? atoi(trackOutZeros) : -1);
-					bool res = lastReader->TestOrFillTrackBuf(builtTracks, tNum, (int)tFrames, tDataSize, trackType, trackTypeX, tPregap, tOmittedPregap, tInZeros, tOutZeros, trackSha1);
-					if (!builtTracks) return res; // only test track 1
-				}
-				if (!builtTracks) return false;
-
-				if (builtTracks->size() && (*builtFile = BuildCHDFromTracks(*builtTracks, chdRomSize, chdRomSha1)) != NULL)
-				{
-					(*builtFile)->path.assign(lastReader->src.path).append("|AS_CHD");
-					break;
-				}
-			}
-			if (builtTracks) for (BuiltTrack* bt : *builtTracks) delete bt;
 			return false;
 		}
 
@@ -1737,17 +1580,19 @@ struct SFileIso : SFile
 		}
 	};
 
-	static SFile* BuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize, const char* chdRomSha1)
+	static bool UsesExtension(const char* ext3, bool as_output)
 	{
-		std::vector<IsoReader::BuiltTrack*> builtTracks;
-		SFile* builtFile = NULL;
-		IsoReader::TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, chdRomSha1, &builtTracks, &builtFile);
-		return builtFile;
+		return ext3 && (!strncasecmp(ext3, "ISO", 3) || !strncasecmp(ext3, "CHD", 3) || !strncasecmp(ext3, "CUE", 3) || (!as_output && (!strncasecmp(ext3, "INS", 3) || !strncasecmp(ext3, "IMG", 3) || !strncasecmp(ext3, "IMA", 3))));
 	}
 
-	static bool CanPotentiallyBuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize)
+	static bool ValidSuperflous(const std::vector<SFile*>& files, SFile* chk)
 	{
-		return IsoReader::TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, NULL, NULL, NULL);
+		// Check if a superfluous file entry parsed by IsoReader matches what IsoWriter generates (which can only be directory entries and then the date/time needs to match the highest child date)
+		const char* fiPath = chk->path.c_str(); size_t fiLen = chk->path.length() - 1; // len without slash
+		if (!*fiPath || (fiPath[fiLen] != '/' && fiPath[fiLen] != '\\')) return false;
+		const SFile* fiDate = NULL;
+		for (const SFile* fi : files) if (fi->IsContainedBy(fiPath, fiLen) && (!fiDate || (fi->date > fiDate->date || (fi->date == fiDate->date && fi->time > fiDate->time)))) fiDate = fi;
+		return (chk->date == (fiDate ? fiDate->date : 0) && chk->time == (fiDate ? fiDate->time : 0));
 	}
 
 	static bool IndexFiles(SFile& fi, std::vector<SFile*>& files)
@@ -1768,7 +1613,7 @@ struct SFileIso : SFile
 		for (IsoReader::Track& t : reader->tracks) { if (!t.audio) { datatrack = &t; break; } }
 		if (datatrack && datatrack->file)
 		{
-			const Bit8u* pvd = reader->ReadSector(IsoReader::ISO_FIRST_VD);
+			const Bit8u* pvd = reader->ReadSector(ISO_FIRST_VD);
 			if      (pvd && pvd[0] == 1 && !strncmp((char*)(&pvd[1]), "CD001", 5) && pvd[6]  == 1) { havedata = true; iso = true;  }
 			else if (pvd && pvd[8] == 1 && !strncmp((char*)(&pvd[9]), "CDROM", 5) && pvd[14] == 1) { havedata = true; iso = false; }
 
@@ -1801,15 +1646,652 @@ struct SFileIso : SFile
 		Bit64u posAndLen = pos+len, readEnd = (posAndLen > size ? size : posAndLen), readLen = (readEnd - pos);
 		for (Bit64u remain = readLen; remain;)
 		{
-			const Bit8u* buf = reader.ReadSector(firstsector + (Bit32u)(pos / IsoReader::ISO_FRAMESIZE));
+			const Bit8u* buf = reader.ReadSector(firstsector + (Bit32u)(pos / ISO_FRAMESIZE));
 			if (!buf) { ZIP_ASSERT(0); return 0; }
-			Bit16u sectorOfs = (Bit16u)(pos % IsoReader::ISO_FRAMESIZE), sectorRemain = (Bit16u)IsoReader::ISO_FRAMESIZE - sectorOfs, step = (remain < sectorRemain ? (Bit16u)remain : sectorRemain);
+			Bit16u sectorOfs = (Bit16u)(pos % ISO_FRAMESIZE), sectorRemain = (Bit16u)ISO_FRAMESIZE - sectorOfs, step = (remain < sectorRemain ? (Bit16u)remain : sectorRemain);
 			memcpy(data, buf + sectorOfs, step);
 			data += step;
 			remain -= step;
 			pos += step;
 		}
 		return readLen;
+	}
+
+	struct IsoWriter : SFile::Writer
+	{
+		// Make CHD and BIN files with just 2048 byte sized sectors, also supports making .ISO files
+		#define ISOGEN_SECTOR_SIZE 2048
+
+		// Make CHD and BIN files with raw sectors including sync head and checksums, disables support for making .ISO files
+		//#define ISOGEN_SECTOR_SIZE 2352
+
+		struct SQueuedFile { const char *wpath, *wpathX; bool is_dir; Bit16u wdate, wtime; SFile* src; };
+
+		// ISO record structures (recordLen is always zero padded to an even number of bytes)
+		struct PathRecord
+		{
+			PathRecord() {}
+			Bit8u nameLen, extAttrLen, dirSector[4], parentNumber[2], name[222];
+			Bit32u _parentPathIndex, _DirRecordStart, _DirRecordEnd, _DirRecordSectors, _DirSector;
+			inline Bit8u RecordLen() { return (Bit8u)(8 + ((nameLen + 1) & ~1)); } // pad to even byte numbers
+			inline void Pad() { if (nameLen & 1) name[nameLen] = '\0'; } // pad to even byte numbers
+		};
+		struct DirRecord
+		{
+			enum : Bit8u { FLAG_DIR = ISO_DIRECTORY, RECORD_LEN_BASE = 33 };
+			Bit8u recordLen, extAttrLen, dataSector[8], dataSize[8], dateY, dateM, dateD, timeH, timeM, timeS, timeZone, fileFlags, fileUnitSize, interleaveGapSize, VolumeSeqNumber[4], nameLen, name[222];
+			Bit32u _fileIndex, _pathIndex;
+			DirRecord() {}
+			DirRecord(SQueuedFile* qf, Bit32u fileIndex, Bit32u pathIndex, bool isDir, const char* _name, Bit8u _nameLen) : _fileIndex(fileIndex), _pathIndex(pathIndex)
+			{
+				recordLen = RECORD_LEN_BASE + _nameLen + (1 - (_nameLen & 1)); // pad to even byte numbers
+				extAttrLen = 0;
+				Bit32u siz = ((qf && qf->src) ? (Bit32u)qf->src->size : (Bit32u)0);
+				ZIP_WRITE_LB32(dataSize, siz);
+				SetDate((qf ? qf->wdate : 0), (qf ? qf->wtime : 0));
+				timeZone = 0; // gmtOffset;
+				fileFlags = (isDir ? FLAG_DIR : 0); // file flags
+				fileUnitSize = 0; // interleaved mode file unit size;
+				interleaveGapSize = 0; // Interleave gap size
+				ZIP_WRITE_LB16(VolumeSeqNumber, 1); // volume sequence number
+				nameLen = _nameLen;
+				memcpy(name, _name, _nameLen);
+				if (!(_nameLen & 1)) name[_nameLen] = '\0'; // pad
+			}
+			void SetDate(Bit16u dat, Bit16u tim) { dateY = (Bit8u)((dat>>9)+80); dateM = (Bit8u)((dat>>5)&0xf); dateD = (Bit8u)(dat&0x1f); timeH = (Bit8u)(tim>>11); timeM = (Bit8u)((tim>>5)&0x3f); timeS = (Bit8u)((tim&0x1f)*2); }
+		};
+
+		std::vector<SQueuedFile> filequeue;
+		std::vector<PathRecord> pathRecords; // filled LE, converted to BE during output
+		std::vector<DirRecord> dirRecords;
+		Bit32u pathTableSize = 0, fileSectors = 0, dirRecordSectors = 0, numSectors = 0, chdhunkcount = 0;
+		Bit8u sec[ISO_FRAMESIZE], *chdbuf = NULL, *chdmap = NULL, *chdhunk = NULL, *chdhunkofs;
+		enum { MODE_CHD, MODE_CUE, MODE_ISO } mode;
+
+		IsoWriter(const char* path, const char* pathExt3) : SFile::Writer(path)
+		{
+			if (!failed) switch (pathExt3[1]|0x20)
+			{
+				case 'h':
+					mode = MODE_CHD;
+					fclose(f); // CHD needs wb+ for EndOutput
+					failed |= ((f = fopen_utf8(path, "wb+")) == NULL);
+					break;
+				case 'u': {
+					mode = MODE_CUE;
+					std::string tmp;
+					const char* pathbin = tmp.assign(path, (pathExt3 - path)).append("bin").c_str();
+					FILE *fcue = f;
+					if ((f = fopen_utf8(pathbin, "wb")) == NULL) { fclose(fcue); failed = true; break; }
+					//Log("Writing cue sheet to %s ...\n", path);
+					const char* lastS = strrchr(pathbin, '/'), *lastBS = strrchr(pathbin, '\\');
+					fprintf(fcue, "FILE \"%s\" BINARY\r\n  TRACK 01 MODE1/%u\r\n    INDEX 01 00:00:00\r\n", (lastS > lastBS ? lastS + 1 : lastBS ? lastBS + 1 : path), ISOGEN_SECTOR_SIZE);
+					fclose(fcue);
+					break; }
+				#if ISOGEN_SECTOR_SIZE == 2048
+				default: mode = MODE_ISO; break;
+				#else
+				default: LogErr("IsoWriter Invalid output file '%s', must end with CHD or CUE\n"); failed = true; break;
+				#endif
+			}
+		}
+
+		~IsoWriter() { free(chdbuf); }
+
+		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false)
+		{
+			filequeue.push_back({innerpath, innerpath + strlen(innerpath), is_dir, wdate, wtime, fsrc});
+		}
+
+		static void ChdWriteHeader(Bit8u *rawheader, Bit64u totalSize, Bit64u metaOffset)
+		{
+			memcpy(&rawheader[0], "MComprHD", 8);
+			ZIP_WRITE_BE32(&rawheader[8], CHD_V5_HEADER_SIZE);
+			ZIP_WRITE_BE32(&rawheader[12], 5);
+			memset(&rawheader[16], 0, 32 - 16);
+			ZIP_WRITE_BE64(&rawheader[32], totalSize);
+			ZIP_WRITE_BE64(&rawheader[40], CHD_V5_HEADER_SIZE); // mapoffset
+			ZIP_WRITE_BE64(&rawheader[48], metaOffset); //should be (mapoffset + hunkcount * 4) where hunkcount is ((logicalbytes + hunkbytes - 1) / hunkbytes)
+			ZIP_WRITE_BE32(&rawheader[56], CHD_HUNKBYTES); // hunkbytes (8 units)
+			ZIP_WRITE_BE32(&rawheader[60], CHD_UNITBYTES); // unitbytes
+			memset(&rawheader[64], 0, CHD_V5_HEADER_SIZE - 64);
+		}
+
+		void ChdStartOutput(Bit32u totalISOSectors)
+		{
+			const Bit32u totalunits = (totalISOSectors + CHD_CD_TRACK_PADDING - 1) / CHD_CD_TRACK_PADDING * CHD_CD_TRACK_PADDING;
+			const Bit32u totalunmappedhunks = (totalunits + 7) / 8;
+			const size_t chdHeadSize = // uncompressed chd file structure
+				CHD_V5_HEADER_SIZE // 124 bytes header
+				+ (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES) // hunk map (4 bytes index)
+				+ (CHD_METADATA_HEADER_SIZE + 256); // single data track meta array, followed by zeros until next hunk boundary
+			chdbuf = (Bit8u*)malloc(((chdHeadSize + 7) & ~(Bit64u)7) + CHD_HUNKBYTES);
+			chdmap = chdbuf + CHD_V5_HEADER_SIZE;
+			chdhunk = chdbuf + ((chdHeadSize + 7) & ~(Bit64u)7);
+			Bit8u *rawheader = chdbuf, *meta = rawheader + CHD_V5_HEADER_SIZE + (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES);
+			ChdWriteHeader(rawheader, (totalunits * CHD_UNITBYTES), (Bit64u)(meta - rawheader));
+
+			int len = sprintf((char*)meta + CHD_METADATA_HEADER_SIZE, "TRACK:%d TYPE:%s SUBTYPE:%s FRAMES:%d PREGAP:%d PGTYPE:%s PGSUB:%s POSTGAP:%d",
+				1, (ISOGEN_SECTOR_SIZE == 2048 ? "MODE1" : "MODE1_RAW"), "NONE", (int)totalISOSectors, 0, "MODE1", "NONE", 0);
+
+			ZIP_WRITE_BE32(&meta[0], CHD_CDROM_TRACK_METADATA2_TAG);
+			ZIP_WRITE_BE32(&meta[4], len + 1); // len of formatted string with \0 terminator
+			meta[4] = 0x1; // ALWAYS 0x01 (defined as CHD_MDFLAGS_CHECKSUM)
+			ZIP_WRITE_BE64(&meta[8], 0); // offset from file start to next meta element, 0 for last element
+
+			const size_t finalHeadLen = (meta + CHD_METADATA_HEADER_SIZE + len + 1 - chdbuf);
+			failed |= !fwrite(chdbuf, finalHeadLen, 1, f);
+			memset(chdhunk, 0, CHD_HUNKBYTES);
+			failed |= !fwrite(chdhunk, CHD_HUNKBYTES - (finalHeadLen % CHD_HUNKBYTES), 1, f);
+			chdhunkofs = chdhunk;
+			chdhunkcount = (Bit32u)((finalHeadLen + CHD_HUNKBYTES - 1) / CHD_HUNKBYTES);
+		}
+
+		void ChdEndOutput()
+		{
+			if (mode != MODE_CHD) return;
+
+			const size_t totalunmappedhunks = ((chdmap - (chdbuf + CHD_V5_HEADER_SIZE)) / 4) + ((chdhunkofs != chdhunk) ? 1 : 0);
+			if (Bit32u garbagehunkidx = ((chdhunkofs != chdhunk && chdhunkofs <= chdhunk + (CHD_HUNKBYTES / 2) && totalunmappedhunks > 256) ? ZIP_READ_BE32(chdmap - 256*4) : 0))
+			{
+				// An unintended (but consistent) behavior of chdman can add garbage at the end of the final chunk from 256 (mapped) hunks ago
+				memset(chdhunkofs, 0, (chdhunk + (CHD_HUNKBYTES / 2) - chdhunkofs));
+				fseek_wrap(f, (garbagehunkidx * CHD_HUNKBYTES + (CHD_HUNKBYTES / 2)), SEEK_SET);
+				failed |= !fread(chdhunk + (CHD_HUNKBYTES / 2), (CHD_HUNKBYTES / 2), 1, f);
+				fseek_wrap(f, 0, SEEK_END);
+				ChdPutHunk();
+			}
+			else if (chdhunkofs != chdhunk)
+			{
+				memset(chdhunkofs, 0, (chdhunk + CHD_HUNKBYTES - chdhunkofs));
+				ChdPutHunk();
+			}
+			ZIP_ASSERT(ZIP_READ_BE32(chdmap) == CHD_CDROM_TRACK_METADATA2_TAG); // chdmap should now be perfectly filled and the cursor ends up being where the first track meta tag is
+			fseek(f, 0, SEEK_SET);
+			failed |= !fwrite(chdbuf, chdmap - chdbuf, 1, f); // write hunk map
+		}
+
+		void ChdPutHunk()
+		{
+			bool allzeros = true;
+			for (Bit64u* p = (Bit64u*)chdhunk, *pEnd = (Bit64u*)(chdhunk + CHD_HUNKBYTES); p != pEnd; p++) { if (*p) { allzeros = false; break; } }
+			if (allzeros)
+			{
+				ZIP_WRITE_BE32(chdmap, 0);
+				chdmap += 4;
+			}
+			else
+			{
+				ZIP_WRITE_BE32(chdmap, chdhunkcount);
+				chdmap += 4;
+				failed |= !fwrite(chdhunk, CHD_HUNKBYTES, 1, f);
+				chdhunkcount++;
+			}
+			chdhunkofs = chdhunk;
+		}
+
+		void WriteSector(size_t len)
+		{
+			ZIP_ASSERT(len <= ISO_FRAMESIZE);
+			memset(sec + len, 0, ISO_FRAMESIZE - len);
+			#if ISOGEN_SECTOR_SIZE == 2048 // ISO with 2048 bytes per sector
+			if (mode == MODE_CHD) { memcpy(chdhunkofs, sec, ISO_FRAMESIZE); if ((chdhunkofs += CHD_UNITBYTES) == (chdhunk + CHD_HUNKBYTES)) ChdPutHunk(); }
+			else failed |= !fwrite(sec, ISO_FRAMESIZE, 1, f);
+			#elif ISOGEN_SECTOR_SIZE == 2352 // BIN with 2352 bytes per sector, MODE1 Data Track
+			// MODE1 sector generation based on ECM by Neill Corlett
+			Bit8u head[16], tail[288];
+			// [0x000 ~ 0x00B] Sync pattern (00 FF ... FF 00)
+			head[0] = 0x00;
+			memset(head + 0x001, 0xFF, 0x00A);
+			head[0x00B] = 0x00;
+			// [0x00C ~ 0x00E] Sector address in MSF format (decimal number in hex)
+			Bit32u nsector = numSectors + (75 * 2);
+			Bit8u addrM = (nsector / (75 * 60)), addrS =  ((nsector / 75) % 60), addrF = (nsector % 75);
+			head[0x00C] = ((addrM / 10 * 0x10) | (addrM % 10));
+			head[0x00D] = ((addrS / 10 * 0x10) | (addrS % 10));
+			head[0x00E] = ((addrF / 10 * 0x10) | (addrF % 10));
+			// [0x00F] Data Track Mode
+			head[0x00F] = 0x01;
+			// EDC and ECC lookup tables
+			static Bit8u ecc_f_lut[256], ecc_b_lut[256];
+			static Bit32u edc_lut[256];
+			if (!edc_lut[1]) 
+			{
+				for (Bit32u i = 0; i < 256; i++)
+				{
+					Bit8u j = (Bit8u)((i << 1) ^ (i & 0x80 ? 0x11D : 0));
+					ecc_f_lut[i] = j;
+					ecc_b_lut[i ^ j] = i;
+					Bit32u edc = i;
+					for (j = 0; j < 8; j++) edc = (edc >> 1) ^ (edc & 1 ? 0xD8018001 : 0);
+					edc_lut[i] = edc;
+				}
+			}
+			// [0x810 ~ 0x813] EDC (4 byte checksum)
+			Bit32u edc = 0;
+			//for (Bit8u *edcsrc = sector, *edcend = edcsrc + 0x810; edcsrc != edcend;) edc = (edc >> 8) ^ edc_lut[(edc ^ *(edcsrc++)) & 0xFF];
+			for (Bit8u *edcsrc = head, *edcend = head + 0x010; edcsrc != edcend;) edc = (edc >> 8) ^ edc_lut[(edc ^ *(edcsrc++)) & 0xFF];
+			for (Bit8u *edcsrc = sec,  *edcend = sec  + 0x800; edcsrc != edcend;) edc = (edc >> 8) ^ edc_lut[(edc ^ *(edcsrc++)) & 0xFF];
+			ZIP_WRITE_LE32(tail, edc);
+			// [0x814 ~ 0x81B] Reserved (zeroed)
+			memset(tail + 0x004, 0x00, 8);
+			// [0x81C ~ 0x92F] ECC (Error correction codes)
+			Bit8u *eccout = tail+0x00C;
+			const size_t major_counts[] = { 86, 52 }, minor_counts[] = { 24, 43 }, major_mults[] = { 2, 86 }, minor_incs[] = { 86, 88 };
+			for (int pq = 0; pq != 2; pq++, eccout += 0xAC) // first P then Q codes 0xAC bytes afterwards
+			{
+				const size_t major_count = major_counts[pq], minor_count = minor_counts[pq], major_mult = major_mults[pq], minor_inc = minor_incs[pq];
+				for (size_t size = major_count * minor_count, major = 0; major < major_count; major++)
+				{
+					Bit8u ecc_a = 0, ecc_b = 0;
+					for (size_t index = (major >> 1) * major_mult + (major & 1), minor = 0; minor < minor_count; minor++)
+					{
+						const Bit8u temp = (index < 4 ? head[0x00C + index] : (index < 2052 ? sec[index - 4] : tail[index - 2052]));
+						index += minor_inc;
+						if (index >= size) { index -= size; }
+						ecc_b ^= temp;
+						ecc_a = ecc_f_lut[ecc_a ^ temp];
+					}
+					ecc_a = ecc_b_lut[ecc_f_lut[ecc_a] ^ ecc_b];
+					eccout[major              ] = (ecc_a        );
+					eccout[major + major_count] = (ecc_a ^ ecc_b);
+				}
+			}
+			if (mode == MODE_CHD)
+			{
+				memcpy(chdhunkofs + 0x000, head, sizeof(head)); // [0x000 ~ 0x00F] Head
+				memcpy(chdhunkofs + 0x010, sec,  sizeof(sec )); // [0x010 ~ 0x80F] Data
+				memcpy(chdhunkofs + 0x810, tail, sizeof(tail)); // [0x810 ~ 0x92F] Tail
+				if ((chdhunkofs += CHD_UNITBYTES) == (chdhunk + CHD_HUNKBYTES)) ChdPutHunk();
+			}
+			else
+			{
+				failed |= !fwrite(head, sizeof(head), 1, fiso); // [0x000 ~ 0x00F] Head
+				failed |= !fwrite(sec,  sizeof(sec ), 1, fiso); // [0x010 ~ 0x80F] Data
+				failed |= !fwrite(tail, sizeof(tail), 1, fiso); // [0x810 ~ 0x92F] Tail
+			}
+			#else
+			#error Not implemented
+			#endif
+			numSectors++;
+		}
+
+		void FillDir(SQueuedFile* qf, size_t baseLen = 0, Bit8u dirNameLen = 0, const DirRecord* parentDot = NULL, Bit32u parentPathIndex = 0, Bit32u parentDirRecordIndex = (Bit32u)-1)
+		{
+			ZIP_ASSERT(!qf || !baseLen || (qf->wpath[baseLen] == '/' && qf->wpath[baseLen-1] != '/' && qf->wpath[baseLen+1] != '/'));
+			//if (qf) printf("DIR [%8.*s]/[%-8.*s] (First File:  %.*s)\n", (parentDot ? pathRecords[parentDot->_pathIndex].nameLen : 0), (parentDot ? (char*)pathRecords[parentDot->_pathIndex].name : ""), dirNameLen, qf->wpath + baseLen - dirNameLen, (int)(qf->wpathX - qf->wpath), qf->wpath);
+
+			PathRecord pr;
+			pr.nameLen = (dirNameLen ? dirNameLen : 1);
+			pr.extAttrLen = 0;
+			memcpy(pr.name, (dirNameLen ? qf->wpath + baseLen - dirNameLen : "\0"), pr.nameLen);
+			pr.Pad();
+			pathTableSize += pr.RecordLen();
+			pr._parentPathIndex = parentPathIndex;
+			pr._DirRecordStart = (Bit32u)dirRecords.size();
+
+			size_t dirLen = (baseLen ? baseLen + 1 : 0); // including slash
+			SQueuedFile *qfFirst = qf, *qfBegin = (qf ? &filequeue[0] : NULL), *qfEnd = qfBegin + filequeue.size(), *qfDate = NULL;
+			Bit32u dirSectors = 1, dirBytesLeft = (ISO_FRAMESIZE - ((DirRecord::RECORD_LEN_BASE + 1) * 2)); // dot and dotdot records already used
+			dirRecords.resize(dirRecords.size() + 2);
+			if (qf) for (const char *curName, *curNameEnd, *lastName = NULL, *lastNameEnd = NULL;; lastName = curName, lastNameEnd = curNameEnd)
+			{
+				if (!qfDate || (qf->wdate > qfDate->wdate || (qf->wdate == qfDate->wdate && qf->wtime > qfDate->wtime))) qfDate = qf;
+				const char *sfPath = qf->wpath, *dirTerm = qf->wpathX - 1;
+				curName = sfPath + dirLen;
+				while (dirTerm >= curName && *dirTerm != '/' && *dirTerm != '\\') dirTerm--;
+				curNameEnd = (dirTerm >= curName ? dirTerm : qf->wpathX);
+				size_t nameLen = (curNameEnd - curName);
+				if (nameLen && nameLen < sizeof(((DirRecord*)qf)->name) && (nameLen != (size_t)(lastNameEnd - lastName) || memcmp(curName, lastName, nameLen)))
+				{
+					//printf("    %s [%.*s] Size: %u\n", ((dirTerm >= curName) ? "SDIR" : "FILE"), nameLen, curName, (qf->src ? (unsigned)qf->src->size : (unsigned)0));
+					dirRecords.emplace_back(qf, (Bit32u)(qf - qfBegin), (Bit32u)-1, (dirTerm >= curName), curName, (Bit8u)nameLen);
+					if (dirTerm < curName) fileSectors += (Bit32u)(((qf ? qf->src->size : (Bit64u)0) + (ISO_FRAMESIZE-1)) / ISO_FRAMESIZE);
+					Bit32u drLen = dirRecords.back().recordLen;
+					if (dirBytesLeft < drLen) { dirSectors++; dirBytesLeft = ISO_FRAMESIZE - drLen; } else dirBytesLeft -= drLen;
+				}
+				if (++qf == qfEnd || (size_t)(qf->wpathX - qf->wpath) <= baseLen || memcmp(qf->wpath, sfPath, dirLen)) break;
+			}
+
+			Bit32u pathIndex = (Bit32u)pathRecords.size();
+			pr._DirRecordEnd = (Bit32u)dirRecords.size();
+			pr._DirRecordSectors = dirSectors;
+			pathRecords.push_back(pr);
+			dirRecordSectors += dirSectors;
+
+			if (qfFirst->wpathX == qfFirst->wpath || qfFirst->wpathX[-1] == '/' || qfFirst->wpathX[-1] == '\\') qfDate = qfFirst;
+			DirRecord drDot(qfDate, (Bit32u)-1, pathIndex, true, "\0", (Bit8u)1);
+			dirRecords[pr._DirRecordStart + 0] = drDot;
+			dirRecords[pr._DirRecordStart + 1] = (parentDot ? *parentDot : drDot);
+			dirRecords[pr._DirRecordStart + 1].name[0] = '\x01';
+			if (parentDot) dirRecords[parentDirRecordIndex].SetDate((qfDate ? qfDate->wdate : 0), (qfDate ? qfDate->wtime : 0));
+
+			for (Bit32u i = pr._DirRecordStart + 2, iEnd = pr._DirRecordEnd; i != iEnd; i++)
+			{
+				DirRecord& dr = dirRecords[i];
+				if (!(dr.fileFlags & DirRecord::FLAG_DIR)) continue;
+				dr._pathIndex = (Bit32u)pathRecords.size();
+				FillDir(qfBegin + dr._fileIndex, dirLen + dr.nameLen, dr.nameLen, &drDot, pathIndex, i);
+			}
+		}
+
+		static int SortFunc(const void* va, const void* vb)
+		{
+			SQueuedFile *a = (SQueuedFile*)va, *b = (SQueuedFile*)vb;
+			int la = (int)(a->wpathX - a->wpath), lb = (int)(b->wpathX - b->wpath), res = memcmp(a->wpath, b->wpath, ZIP_MIN(la, lb));
+			return (res ? res : la < lb ? -1 : 1);
+		}
+
+		virtual bool Finalize(char* XmlGameInner)
+		{
+			if (failed) return false;
+
+			// See if there is a <isolabel> element we can use as the label for the ISO 9660 file system
+			char *label = NULL, *labelX = NULL, *pXml = XmlGameInner, *pXmlEnd, *pXmlNext, *pXmlText, *pXmlTextX;
+			for (EXml x; pXml && (x = XMLParse(pXml, pXmlEnd)) != XML_END && x != XML_ELEM_END && (pXmlNext = XMLLevel(pXmlEnd, x, &pXmlText, &pXmlTextX)) != NULL; pXml = pXmlNext)
+				if (XMLMatchTag(pXml, pXmlEnd, "isolabel", 8, NULL))
+					{ XMLInlineStringConvert(pXmlText, pXmlTextX); label = pXmlText; labelX = pXmlTextX; break; }
+
+			// Sort files by filename
+			if (!filequeue.empty()) qsort(&filequeue[0], filequeue.size(), sizeof(filequeue[0]), SortFunc);
+
+			//Log("Preparing CD-ROM ISO 9660 Structure ...\n");
+			FillDir((!filequeue.empty() ? &filequeue[0] : NULL));
+
+			const Bit32u lePathTableSector = ISO_FIRST_VD + 1 + 1;
+			const Bit32u pathTableSectors = ((pathTableSize + (ISO_FRAMESIZE-1)) / ISO_FRAMESIZE);
+			const Bit32u bePathTableSector = lePathTableSector + pathTableSectors;
+			const Bit32u firstDirRecordSector = bePathTableSector + pathTableSectors;
+			const Bit32u firstFileDataSector = firstDirRecordSector + dirRecordSectors;
+			const Bit32u totalISOSectors = firstFileDataSector + fileSectors;
+			//Log("Got %u files in %u directories which will result in a %u MB size ISO\n", (unsigned)filequeue.size(), (unsigned)pathRecords.size(), (unsigned)(totalISOSectors * 2048 / 1024 / 1024));
+
+			// 16 boot sectors, volume descriptor, volume terminator
+			//Log("Writing header sectors...\n");
+			if (mode == MODE_CHD) ChdStartOutput(totalISOSectors);
+			for (int i = 0; i != ISO_FIRST_VD; i++) WriteSector(0);
+			sec[0] = 1; // type primary volume
+			memcpy(sec+1, "CD001", 5); // id
+			sec[6] = 1; // version
+			sec[7] = 0; // unused
+			memset(sec+8, ' ', 32); // system id string
+			memset(sec+40, ' ', 32); // volume id string
+			if (label) memcpy(sec+40, label, ZIP_MIN((labelX - label), 32));
+			memset(sec+72, 0, 8); // unused
+			ZIP_WRITE_LB32(sec+80, totalISOSectors) // total logical sectors
+			memset(sec+88, 0, 32); // unused
+			ZIP_WRITE_LB16(sec+120, 1) // set number
+			ZIP_WRITE_LB16(sec+124, 1) // sequence number
+			ZIP_WRITE_LB16(sec+128, ISO_FRAMESIZE) // logical block size
+			ZIP_WRITE_LB32(sec+132, pathTableSize) // path table size
+			ZIP_WRITE_LE32(sec+140, lePathTableSector) // path table sector le
+			ZIP_WRITE_LE32(sec+144, 0) // path table opt le
+			ZIP_WRITE_BE32(sec+148, bePathTableSector) // path table sector be
+			ZIP_WRITE_BE32(sec+152, 0) // path table opt be
+			ZIP_ASSERT(dirRecords[0].recordLen == 34 && (dirRecords[0].fileFlags & DirRecord::FLAG_DIR) && dirRecords[0].name[0] == '\0');
+			ZIP_WRITE_LB32(dirRecords[0].dataSector, firstDirRecordSector);
+			ZIP_WRITE_LB32(dirRecords[0].dataSize, pathRecords[0]._DirRecordSectors * ISO_FRAMESIZE);
+			memcpy(sec+156, &dirRecords[0], DirRecord::RECORD_LEN_BASE + 1);
+			memset(sec+190, ' ', 128); // set id
+			memset(sec+318, ' ', 128); // publisher id
+			memset(sec+446, ' ', 128); // preparer id
+			memset(sec+574, ' ', 128); // application id
+			memset(sec+702, ' ', 37); // copyright file id
+			memset(sec+739, ' ', 37); // abstract file id
+			memset(sec+776, ' ', 37); // bibliographic file id
+			memcpy(sec+813, "0000000000000000\0", 17); // creation time
+			memcpy(sec+830, "0000000000000000\0", 17); // modification time
+			memcpy(sec+847, "0000000000000000\0", 17); // expiration time
+			memcpy(sec+864, "0000000000000000\0", 17); // effective time
+			sec[881] = 1; // file struct version
+			WriteSector(882);
+			sec[0] = 255; // type terminator
+			memcpy(sec+1, "CD001", 5); // id
+			sec[6] = 1; // version
+			WriteSector(7);
+			if (failed) return false;
+
+			PathRecord *prBegin = &pathRecords[0], *prEnd = prBegin + pathRecords.size();
+			Bit32u dirSec = firstDirRecordSector;
+			for (PathRecord* pr = prBegin; pr != prEnd; dirSec += (pr++)->_DirRecordSectors) pr->_DirSector = dirSec;
+			ZIP_ASSERT(dirSec == firstFileDataSector);
+
+			//Log("Writing %u path records ...\n", (unsigned)pathRecords.size());
+			for (Bit32u tableBE = 0; tableBE != 2; tableBE++)
+			{
+				ZIP_ASSERT(numSectors == (!tableBE ? lePathTableSector : bePathTableSector));
+				Bit32u ofs = 0, remain = ISO_FRAMESIZE;
+				for (PathRecord* pr = prBegin; pr != prEnd; remain = ISO_FRAMESIZE)
+				{
+					while (remain && pr != prEnd)
+					{
+						Bit16u parentNumber = (Bit16u)(pr->_parentPathIndex + 1);
+						if (!tableBE) { ZIP_WRITE_LE32(pr->dirSector, pr->_DirSector); ZIP_WRITE_LE16(pr->parentNumber, parentNumber) }
+						else          { ZIP_WRITE_BE32(pr->dirSector, pr->_DirSector); ZIP_WRITE_BE16(pr->parentNumber, parentNumber) }
+						Bit32u step = (pr->RecordLen() - ofs);
+						if (remain >= step) { memcpy((sec+ISO_FRAMESIZE)-remain, ((Bit8u*)pr) + ofs, step  ); ofs =      0; remain -= step; pr++; }
+						else                { memcpy((sec+ISO_FRAMESIZE)-remain, ((Bit8u*)pr) + ofs, remain); ofs = remain; remain  = 0; }
+					}
+					WriteSector(ISO_FRAMESIZE-remain);
+				}
+			}
+			ZIP_ASSERT(numSectors == firstDirRecordSector);
+
+			//Log("Writing %u directory records ...\n", (unsigned)dirRecords.size());
+			Bit32u fileSec = firstFileDataSector;
+			for (PathRecord* pr = prBegin; pr != prEnd; pr++)
+			{
+				ZIP_ASSERT(numSectors == pr->_DirSector);
+				Bit32u remain = ISO_FRAMESIZE;
+				for (DirRecord *dr = &dirRecords[pr->_DirRecordStart], *drEnd = &dirRecords[0] + pr->_DirRecordEnd; dr != drEnd; remain = ISO_FRAMESIZE)
+				{
+					for (; remain >= dr->recordLen && dr != drEnd; remain -= (dr++)->recordLen)
+					{
+						if (dr->fileFlags & DirRecord::FLAG_DIR)
+						{
+							PathRecord* subpr = &pathRecords[dr->_pathIndex];
+							ZIP_WRITE_LB32(dr->dataSector, subpr->_DirSector);
+							ZIP_WRITE_LB32(dr->dataSize, subpr->_DirRecordSectors * ISO_FRAMESIZE);
+						}
+						else
+						{
+							Bit32u dataSize = ZIP_READ_LE32(dr->dataSize);
+							ZIP_WRITE_LB32(dr->dataSector, (dataSize ? fileSec : 0));
+							if (dataSize) fileSec += (dataSize + (ISO_FRAMESIZE-1)) / ISO_FRAMESIZE;
+						}
+						memcpy((sec+ISO_FRAMESIZE)-remain, dr, dr->recordLen);
+					}
+					WriteSector(ISO_FRAMESIZE-remain);
+				}
+			}
+			ZIP_ASSERT(numSectors == firstFileDataSector && fileSec == totalISOSectors);
+
+			//Log("Writing file contents ...\n");
+			for (DirRecord *dr = &dirRecords[0], *drEnd = &dirRecords[0] + dirRecords.size(); dr != drEnd; dr++)
+			{
+				if ((dr->fileFlags & DirRecord::FLAG_DIR) || !ZIP_READ_LE32(dr->dataSize)) continue;
+				ZIP_ASSERT(numSectors == ZIP_READ_LE32(dr->dataSector));
+				SFile* fsrc = filequeue[dr->_fileIndex].src;
+				bool wasOpen = fsrc->IsOpen();
+				if (wasOpen) fsrc->Seek(0); else if (!fsrc->Open()) { failed = true; return false; }
+				for (Bit64u step; (step = fsrc->Read(sec, ISO_FRAMESIZE)) != 0;) WriteSector((size_t)step);
+				if (!wasOpen) fsrc->Close();
+			}
+			ZIP_ASSERT(numSectors == totalISOSectors);
+
+			if (mode == MODE_CHD && !failed) ChdEndOutput();
+			//Log("Done!\n\n");
+			return !failed;
+		}
+	};
+
+	static SFile* BuildCHDFromTracks(std::vector<BuiltTrack*>& builtTracks, Bit64u chdRomSize, const char* chdRomSha1)
+	{
+		for (BuiltTrack* bt : builtTracks) if (!bt) return NULL;
+
+		Bit32u totalunits = 0;
+		for (BuiltTrack* bt : builtTracks)
+		{
+			totalunits += (Bit32u)(bt->buf.size() / bt->data_size);
+			totalunits = (totalunits + (CHD_CD_TRACK_PADDING - 1)) / CHD_CD_TRACK_PADDING * CHD_CD_TRACK_PADDING;
+		}
+		const Bit32u totalunmappedhunks = (totalunits + 7) / 8;
+
+		static const Bit8u zeroedHunkSha1[20] { 0x32, 0x6b, 0xf7, 0xa9, 0x91, 0x84, 0x0c, 0x66, 0x90, 0x49, 0x00, 0xcd, 0x96, 0x89, 0xf5, 0x89, 0xf4, 0x73, 0x10, 0xfa }; // sha1 of HUNKBYTES zero bytes
+
+		Bit64u chdMaxSize = // uncompressed chd file structure
+			CHD_V5_HEADER_SIZE // 124 bytes header
+			+ (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES) // hunk map (4 bytes index)
+			+ ((CHD_METADATA_HEADER_SIZE + 256) * builtTracks.size() + CHD_HUNKBYTES) // track meta array, zeros until next hunk boundary
+			+ (totalunmappedhunks * CHD_HUNKBYTES); // first actual hunk (index is fileoffset / hunksize), all hunks until last, then eof (must be at hunk boundary)
+		SFileMemory* res = new SFileMemory(chdMaxSize);
+		Bit8u *rawheader = res->buf, *hunkmap = rawheader + CHD_V5_HEADER_SIZE, *meta = hunkmap + (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES);
+		IsoWriter::ChdWriteHeader(rawheader, (totalunits * CHD_UNITBYTES), (Bit64u)(meta - rawheader));
+
+		int tnum = 1;
+		for (BuiltTrack* bt : builtTracks)
+		{
+			int len = sprintf((char*)meta + CHD_METADATA_HEADER_SIZE, "TRACK:%d TYPE:%s SUBTYPE:%s FRAMES:%d PREGAP:%d PGTYPE:%s%s PGSUB:%s POSTGAP:%d",
+				tnum++, bt->ttype, "NONE", (int)(bt->buf.size() / bt->data_size), (bt->pregap ? bt->pregap : bt->omitted_pregap), (bt->pregap ? "V" : ""), (bt->pregap ? bt->ttype : "MODE1"), "NONE", 0);
+
+			Bit8u* metanext = meta + CHD_METADATA_HEADER_SIZE + len + 1;
+			ZIP_WRITE_BE32(&meta[0], CHD_CDROM_TRACK_METADATA2_TAG);
+			ZIP_WRITE_BE32(&meta[4], len + 1); // len of formatted string with \0 terminator
+			meta[4] = 0x1; // ALWAYS 0x01 (defined as CHD_MDFLAGS_CHECKSUM)
+			ZIP_WRITE_BE64(&meta[8], (bt == builtTracks.back() ? 0 : (metanext - rawheader))); // offset from file start to next meta element, 0 for last element
+			meta = metanext;
+		}
+
+		struct Local
+		{
+			//// We could store only unique hunks as an optimization but chdman doesn't do this, so we also don't
+			//struct HunkHash { Bit32u next; Bit8u sha[20]; };
+			//HunkHash* hunkHashes;
+			//Bit32u hunkHashMap[256];
+			//Local(Bit32u headhunks, Bit32u totalunmappedhunks) { hunkHashes = (HunkHash*)malloc((headhunks + totalunmappedhunks) * sizeof(HunkHash)); memset(hunkHashMap, 0, sizeof(hunkHashMap)); }
+			//~Local() { free(hunkHashes); }
+			//Bit32u FindHunkIdx(Bit8u hunksha[20]) { for (Bit32u next = hunkHashMap[hunksha[0]]; next; next = hunkHashes[next].next) { if (!memcmp(hunksha, hunkHashes[next].sha, 20)) return next; } return 0; }
+			//void KeepHunkHash(Bit32u hunkidx, Bit8u hunksha[20]) { hunkHashes[hunkidx].next = hunkHashMap[hunksha[0]]; memcpy(hunkHashes[hunkidx].sha, hunksha, 20); hunkHashMap[hunksha[0]] = hunkidx; }
+
+			static void WriteHunk(Bit8u* temphunk, Bit32u& hunkcounter, Bit8u*& hunks, Bit8u*& hunkmap)
+			{
+				Bit8u hunksha[20];
+				SHA1_CTX::Run(temphunk, CHD_HUNKBYTES, hunksha);
+				Bit32u hunkidx = 0;
+				if (memcmp(hunksha, zeroedHunkSha1, 20) /*&& (hunkidx = FindHunkIdx(hunksha)) == 0*/)
+				{
+					hunkidx = hunkcounter++;
+					memcpy(hunks, temphunk, CHD_HUNKBYTES);
+					hunks += CHD_HUNKBYTES;
+					//KeepHunkHash(hunkidx, hunksha);
+				}
+				ZIP_WRITE_BE32(hunkmap, hunkidx);
+				hunkmap += 4;
+			}
+		};
+
+		Bit8u *temphunk = (Bit8u*)malloc(CHD_HUNKBYTES), *hnk = temphunk;
+		Bit32u headhunks = (Bit32u)(((meta - rawheader) + (CHD_HUNKBYTES - 1)) / CHD_HUNKBYTES), hunkcounter = headhunks;
+		Bit8u* hunks = rawheader + headhunks * CHD_HUNKBYTES;
+		memset(meta, 0, (hunks - meta));
+
+		totalunits = 0;
+		for (BuiltTrack* bt : builtTracks)
+		{
+			const Bit32u btdsize = (Bit32u)bt->data_size, btunits = (Bit32u)(bt->buf.size() / btdsize);
+			const bool btaudio = !memcmp(bt->ttype, "AUDIO", 6);
+			for (Bit8u *p = &bt->buf[0], *pEnd = p + btdsize * btunits, clear = 8; p != pEnd; p += btdsize)
+			{
+				memcpy(hnk, p, btdsize);
+				if (clear) { memset(hnk + btdsize, 0, (CHD_UNITBYTES - btdsize)); clear--; }
+				if (btaudio) // CHD audio endian swap
+					for (Bit8u *a = hnk, *aEnd = a + RAW_SECTOR_SIZE, tmp; a < aEnd; a += 2)
+						{ tmp = a[0]; a[0] = a[1]; a[1] = tmp; }
+
+				hnk += CHD_UNITBYTES;
+				if (hnk == &temphunk[CHD_HUNKBYTES])
+				{
+					hnk = temphunk;
+					Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
+				}
+			}
+
+			for (totalunits += btunits; totalunits % CHD_CD_TRACK_PADDING; totalunits++)
+			{
+				memset(hnk, 0, CHD_UNITBYTES);
+				hnk += CHD_UNITBYTES;
+				if (hnk == &temphunk[CHD_HUNKBYTES])
+				{
+					hnk = temphunk;
+					Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
+				}
+			}
+		}
+		if (hnk != temphunk)
+		{
+			memset(hnk, 0, temphunk + CHD_HUNKBYTES - hnk);
+			if (Bit32u garbagehunkidx = ((hnk <= temphunk + CHD_HUNKBYTES / 2 && totalunmappedhunks > 256) ? ZIP_READ_BE32(hunkmap - (256 * 4)) : 0))
+			{
+				// An unintended (but consistent) behavior of chdman can add garbage at the end of the final chunk from 256 hunks ago
+				memcpy(temphunk + CHD_HUNKBYTES / 2, rawheader + (garbagehunkidx * CHD_HUNKBYTES) + (CHD_HUNKBYTES / 2), CHD_HUNKBYTES / 2);
+			}
+			Local::WriteHunk(temphunk, hunkcounter, hunks, hunkmap);
+		}
+		ZIP_ASSERT(hunkmap == rawheader + CHD_V5_HEADER_SIZE + (totalunmappedhunks * CHD_V5_UNCOMPMAPENTRYBYTES));
+		free(temphunk);
+
+		res->size = (hunks - rawheader);
+
+		Bit8u chdRomSha1b[20];
+		if (res->size == chdRomSize && res->GetSHA1() && hextouint8(chdRomSha1, chdRomSha1b, 20) && !memcmp(chdRomSha1b, res->sha1, 20))
+			return res;
+
+		delete res;
+		return NULL;
+	}
+
+	static bool TestOrBuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize, const char* chdRomSha1, std::vector<BuiltTrack*>* builtTracks, SFile** builtFile)
+	{
+		SFileIso::IsoReader* lastReader = NULL;
+		for (SFile* fil : files)
+		{
+			if (fil->typ != SFile::T_ISO || lastReader == &((SFileIso*)fil)->reader) continue;
+			lastReader = &((SFileIso*)fil)->reader;
+
+			EXml x;
+			for (char *pT = pCHDRomOpenTagEnd, *pTEnd = pT; pT && (x = XMLParse(pT, pTEnd)) != XML_END && x != XML_ELEM_END; pT = pTEnd = XMLLevel(pTEnd, x))
+			{
+				char *trackNumber, *trackNumberX, *trackType, *trackTypeX, *trackFrames, *trackFramesX, *trackPregap, *trackPregapX, *trackOmittedPregap, *trackOmittedPregapX, *trackSize, *trackSizeX, *trackSha1, *trackSha1X, *trackInZeros, *trackInZerosX, *trackOutZeros, *trackOutZerosX;
+				if (!XMLMatchTag(pT, pTEnd, "track", 5, "number", &trackNumber, &trackNumberX, "type", &trackType, &trackTypeX, "frames", &trackFrames, &trackFramesX, "pregap", &trackPregap, &trackPregapX, "omitted_pregap", &trackOmittedPregap, &trackOmittedPregapX, "size", &trackSize, &trackSizeX, "sha1", &trackSha1, &trackSha1X, "in_zeros", &trackInZeros, &trackInZerosX, "out_zeros", &trackOutZeros, &trackOutZerosX, NULL)) continue;
+				Bit64u tSize = atoi64(trackSize), tFrames = atoi64(trackFrames);
+				if (!tFrames || (tSize % tFrames)) { ZIP_ASSERT(false); continue; }
+				int tNum = atoi(trackNumber), tDataSize = (int)(tSize / tFrames), tPregap = (trackPregap ? atoi(trackPregap) : 0), tOmittedPregap = (trackOmittedPregap ? atoi(trackOmittedPregap) : 0), tInZeros = (trackInZeros ? atoi(trackInZeros) : -1), tOutZeros = (trackOutZeros ? atoi(trackOutZeros) : -1);
+				bool res = lastReader->TestOrFillTrackBuf(builtTracks, tNum, (int)tFrames, tDataSize, trackType, trackTypeX, tPregap, tOmittedPregap, tInZeros, tOutZeros, trackSha1);
+				if (!builtTracks) return res; // only test track 1
+			}
+			if (!builtTracks) return false;
+
+			if (builtTracks->size() && (*builtFile = BuildCHDFromTracks(*builtTracks, chdRomSize, chdRomSha1)) != NULL)
+			{
+				(*builtFile)->path.assign(lastReader->src.path).append("|AS_CHD");
+				break;
+			}
+		}
+		if (builtTracks) for (BuiltTrack* bt : *builtTracks) delete bt;
+		return false;
+	}
+
+	static SFile* BuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize, const char* chdRomSha1)
+	{
+		std::vector<BuiltTrack*> builtTracks;
+		SFile* builtFile = NULL;
+		TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, chdRomSha1, &builtTracks, &builtFile);
+		return builtFile;
+	}
+
+	static bool CanPotentiallyBuildCHD(const std::vector<SFile*>& files, char* pCHDRomOpenTagEnd, Bit64u chdRomSize)
+	{
+		return TestOrBuildCHD(files, pCHDRomOpenTagEnd, chdRomSize, NULL, NULL, NULL);
 	}
 };
 
@@ -1985,6 +2467,11 @@ struct SFileFat : SFile
 			}
 		}
 	};
+
+	static bool UsesExtension(const char* ext3)
+	{
+		return (ext3 && (!strncasecmp(ext3, "IMG", 3) || !strncasecmp(ext3, "IMA", 3) || !strncasecmp(ext3, "VHD", 3)));
+	}
 
 	static bool IndexFiles(SFile& fi, std::vector<SFile*>& files)
 	{
@@ -2207,11 +2694,12 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	std::vector<SFile*> gameFiles;
 	gameFiles.resize(needRoms); // all NULL
 
-	std::string tmpPath;
-	tmpPath.assign(outBase).append(gameName, gameNameX - gameName);
-	if (isFix) tmpPath.append(".fix");
-	else if (tmpPath.length() < 5 || ((&tmpPath.back())[-3] != '.' && (&tmpPath.back())[-4] != '.')) tmpPath.append(".zip");
-	const char* outPath = tmpPath.c_str();
+	std::string outPathStr;
+	outPathStr.assign(outBase).append(gameName, gameNameX - gameName);
+	if (outPathStr.length() < 5 || ((&outPathStr.back())[-3] != '.' && (&outPathStr.back())[-4] != '.')) outPathStr.append(".zip");
+	if (isFix) outPathStr.append(".fix");
+	const char *outPath = outPathStr.c_str(), *ext3, *ext4; size_t outPathLen = outPathStr.length();
+	PathGetExt(outPath, outPathLen - (isFix ? 4 : 0), ext3, ext4);
 
 	Bit32u r, matches = 0;
 	bool closeInfoSection = false;
@@ -2223,6 +2711,7 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 			char *linkType, *linkTypeX;
 			if (forceTry && !isFix && (XMLMatchTag(p, pEnd, "link", 4, "type", &linkType, &linkTypeX, NULL) || XMLMatchTag(p, pEnd, "comment", 7, NULL)))
 			{
+				XMLInlineStringConvert(textStart, textEnd);
 				if (!closeInfoSection) { Log("  ----------------------------------------------------------------------------------\n"); closeInfoSection = true; };
 				if (p[1] == 'c') { Log("  Comment: %.*s\n", (int)(textEnd - textStart), textStart); }
 				else { Log("  Link [%.*s]: %.*s\n", (int)(linkTypeX - linkType), linkType, (int)(textEnd - textStart), textStart); }
@@ -2234,11 +2723,12 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 		r++; //make sure to increment r before continue
 		Bit64u size = atoi64(romSize);
 		if (!size && (romNameX[-1] == '/' || romNameX[-1] == '\\')) { matches++; continue; } // directory
+		if (size > (Bit64u)0xFFFFFFFF) { LogErr("  ERROR: Rom [%.*s] file size exceeds 4GB\n", (int)(romNameX - romName), romName); continue; }
 
 		SFile* romFile = NULL;
 		for (SFile* fi : files)
 		{
-			if (fi->size != size || fi->Contains(outPath) || fi->GetCRC32() != (Bit32u)atoi64(romCrc, 0x10)) continue;
+			if (fi->size != size || fi->IsContainedBy(outPath, outPathLen) || fi->GetCRC32() != (Bit32u)atoi64(romCrc, 0x10)) continue;
 			Bit8u romSha1b[20];
 			if (!fi->GetSHA1() || !hextouint8(romSha1, romSha1b, 20) || memcmp(fi->sha1, romSha1b, 20)) continue;
 			if (useSrcDates)
@@ -2286,16 +2776,14 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 	else
 	{
 		if (!isFix) Log("  --> Writing output %s ...\n", outPath);
-		SFileZip::Writer z(outPath);
-		if (z.failed) LogErr("  ERROR: Could not open output file %s\n\n", outPath);
-		for (r = 0, p = pGameInner; !z.failed && p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x, &textStart, &textEnd)) != NULL; p = pNext)
+		SFile::Writer *w = (SFileIso::UsesExtension(ext3, true) ? (SFile::Writer*)new SFileIso::IsoWriter(outPath, ext3) : new SFileZip::ZipWriter(outPath));
+		if (w->failed) LogErr("  ERROR: Could not open output file %s\n\n", outPath);
+		for (r = 0, p = pGameInner; !w->failed && p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x)) != NULL; p = pNext)
 		{
 			char *romName, *romNameX, *romSize, *romSizeX, *romCrc, *romCrcX, *romSha1, *romSha1X, *romDate, *romDateX;
 			if (!XMLMatchTag(p, pEnd, "rom", 3, "name", &romName, &romNameX, "size", &romSize, &romSizeX, "crc", &romCrc, &romCrcX, "sha1", &romSha1, &romSha1X, "date", &romDate, &romDateX, NULL)) continue;
 
-			Bit64u size = atoi64(romSize);
 			SFile* romFile = gameFiles[r++]; //make sure to increment r before continue
-
 			Bit16u zdate = 0, ztime = 0;
 			if (romDate)
 			{
@@ -2313,37 +2801,43 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 			*romNameX = '\0'; // temporarily null terminate
 			if (romFile)
 			{
+				ZIP_ASSERT(romFile->size == atoi64(romSize) && romFile->path.back() != '/' && romFile->path.back() != '\\' && romNameX[-1] != '/' && romNameX[-1] != '\\');
 				if (useSrcDates && (romFile->date != (Bit16u)-1 || romFile->time != (Bit16u)-1)) { zdate = romFile->date; ztime = romFile->time; } // use dates in sources, ignoring the dates in the XML
 				if (!isFix) Log("    Storing [%s] as [%s]...\n", romFile->path.c_str(), romName);
-				z.WriteFile(romName, false, (Bit32u)size, zdate, ztime, romFile, isFix);
+				w->WriteFile(romName, false, zdate, ztime, (romFile->size ? romFile : NULL), isFix);
 			}
-			else if (size == 0)
+			else if (atoi64(romSize) == 0)
 			{
 				if (!isFix) Log("    Generating %s [%s] ...\n", ((romNameX[-1] == '/' || romNameX[-1] == '\\') ? "directory" : "empty"), romName);
-				z.WriteFile(romName, (romNameX[-1] == '/' || romNameX[-1] == '\\'), 0, zdate, ztime, NULL);
+				w->WriteFile(romName, (romNameX[-1] == '/' || romNameX[-1] == '\\'), zdate, ztime, NULL);
 			}
 			else { ZIP_ASSERT(false); } // should not be possible
 			*romNameX = romName[-1]; // undo null terminate
 		}
-		if (!z.failed) z.Finalize();
-		if (z.failed) LogErr("  ERROR: Unknown error writing output file %s\n\n", outPath);
-		if (!isFix) Log("  Done! Successfully wrote %.*s with %u files!\n\n", (int)(gameNameX - gameName), gameName, needRoms);
-		res = !z.failed;
+		if (!w->Finalize(pGameInner)) LogErr("  ERROR: Unknown error writing output file %s\n\n", outPath);
+		else if (!isFix) Log("  Done! Successfully wrote %.*s with %u files!\n\n", (int)(gameNameX - gameName), gameName, needRoms);
+		res = !w->failed;
+		delete w;
 	}
-	for (Bit32u i = needRoms; i != gameFiles.size(); i++) delete gameFiles[i]; // delete generated CHDs
+	for (size_t i = gameFiles.size(); i-- != needRoms;) delete gameFiles[i]; // delete generated CHDs
 	return res;
 }
 
-static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, std::vector<SFile *>& workFiles, bool fixMode = false, bool crcOnlyCheck = false, char** pGameEn = NULL)
+static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const std::string& outBase, std::string& workPath, std::vector<SFile*>& workFiles, bool fixMode = false, bool crcOnlyCheck = false, char** pGameEn = NULL)
 {
 	XMLInlineStringConvert(gameName, gameNameX);
 	workPath.assign(outBase).append(gameName, gameNameX - gameName);
 	if (workPath.length() < 5 || ((&workPath.back())[-3] != '.' && (&workPath.back())[-4] != '.')) workPath.append(".zip");
 	SFileRaw gameFi(workPath, false);
 	if (!gameFi.size) return false;
-	if (!SFileZip::IndexFiles(gameFi, workFiles)) { LogErr("Invalid game file %s (not a ZIP file)\n", gameFi.path.c_str()); return false; }
 
-	Log("Verifying game %s ...\n", gameFi.path.c_str());
+	bool isISO = false;
+	const char *gameFiPath = gameFi.path.c_str(), *ext3, *ext4;
+	PathGetExt(gameFiPath, gameFi.path.length(), ext3, ext4);
+	if (SFileIso::UsesExtension(ext3, true) && SFileIso::IndexFiles(gameFi, workFiles)) isISO = true;
+	else if (!SFileZip::IndexFiles(gameFi, workFiles)) { LogErr("Invalid game file %s (not a ZIP file)\n", gameFiPath); return false; }
+
+	Log("Verifying game %s ...\n", gameFiPath);
 	unsigned romBasePathLen = (unsigned)gameFi.path.length() + 1, romTotal = 0, romCorrect = 0, romUnfixable = 0, romSuperflous = 0;
 	char* p = pGameInner, *pEnd, *pNext;
 	for (EXml x; p && (x = XMLParse(p, pEnd)) != XML_END && x != XML_ELEM_END && (pNext = XMLLevel(pEnd, x)) != NULL; p = pNext)
@@ -2432,7 +2926,8 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 
 	for (SFile* fi : workFiles)
 	{
-		if (fi->was_matched) continue;
+		// Check IsContainedBy to ignore auxiliary files like CUE sheet track binaries
+		if (fi->was_matched || !fi->IsContainedBy(gameFiPath, gameFi.path.length()) || (isISO && SFileIso::ValidSuperflous(workFiles, fi))) continue;
 		Log("  Unnecessary rom '%.*s' exists in game file\n", (int)(fi->path.length() - romBasePathLen), fi->path.c_str() + romBasePathLen);
 		romSuperflous++;
 	}
@@ -2455,15 +2950,15 @@ static bool VerifyGame(char* pGameInner, char* gameName, char* gameNameX, const 
 			Log("  [ERROR] Error while building fixed game\n\n");
 	}
 
-	for (SFile* fi : workFiles) delete fi;
+	for (size_t i = workFiles.size(); i--;) delete workFiles[i]; // delete backwards to delete contained files before their container
 	workFiles.clear();
 
 	if (wasFixed)
 	{
 		// swap old and fix file
 		gameFi.Close();
-		unlink(gameFi.path.c_str());
-		rename(workPath.assign(gameFi.path).append(".fix").c_str(), gameFi.path.c_str());
+		unlink(gameFiPath);
+		rename(workPath.assign(gameFi.path).append(".fix").c_str(), gameFiPath);
 	}
 	return true;
 }
@@ -2578,29 +3073,25 @@ int main(int argc, char *argv[])
 		Log("Indexing available files in source path %s...\n", (srcPath ? srcPath : ""));
 		std::vector<SFile*> files;
 		SFileRaw::IndexFiles(srcPath, files);
-		for (size_t lastNumFiles = 0, numFiles; (numFiles = files.size()) != lastNumFiles; lastNumFiles = numFiles)
+		for (size_t i = 0, numFiles = files.size(); i != numFiles; i++)
 		{
-			for (size_t i = lastNumFiles; i != numFiles; i++)
-			{
-				SFile& fil = *files[i];
-				const char* ext = (fil.path.size() > 4 && fil.path[fil.path.length() - 4] == '.' ? fil.path.c_str() + fil.path.length() - 3 : NULL);
-				const char* ext4 = (!ext && fil.path.size() > 5 && fil.path[fil.path.length() - 5] == '.' ? fil.path.c_str() + fil.path.length() - 4 : NULL);
-				if ((ext && !strncasecmp(ext, "ZIP", 3)) || (ext4 && !strncasecmp(ext4, "DOSC", 4)))
-					SFileZip::IndexFiles(fil, files);
-				if (ext && (!strncasecmp(ext, "ISO", 3) || !strncasecmp(ext, "CHD", 3) || !strncasecmp(ext, "CUE", 3) || !strncasecmp(ext, "INS", 3) || !strncasecmp(ext, "IMG", 3) || !strncasecmp(ext, "IMA", 3)))
-					SFileIso::IndexFiles(fil, files);
-				if (ext && (!strncasecmp(ext, "IMG", 3) || !strncasecmp(ext, "IMA", 3) || !strncasecmp(ext, "VHD", 3)))
-					SFileFat::IndexFiles(fil, files);
-			}
+			SFile& fil = *files[i];
+			const char *ext3, *ext4;
+			PathGetExt(fil.path.c_str(), fil.path.length(), ext3, ext4);
+			if      (SFileZip::UsesExtension(ext3, ext4, false))  SFileZip::IndexFiles(fil, files);
+			else if (SFileIso::UsesExtension(ext3, false))        SFileIso::IndexFiles(fil, files);
+			else if (SFileFat::UsesExtension(ext3))               SFileFat::IndexFiles(fil, files);
+			else continue;
+			numFiles = files.size();
 		}
 		//for (const SFile* fil : files) Log(" - %s (size=\"%u\" date=\"%04d-%02d-%02d %02d:%02d:%02d\")\n", fil->path.c_str(), (unsigned)fil->size, ((fil->date >> 9) + 1980), ((fil->date >> 5) & 0xf), (fil->date & 0x1f), (fil->time >> 11), ((fil->time >> 5) & 0x3f), ((fil->time & 0x1f) * 2));return 0;
 		Log("Finished indexing available files\n\n");
 
 		#if /* Write all files we found into a ZIP */ 0
-		SFileZip::Writer allz(sourcePathTmp.assign(xmlPath).append(".allsources.dosz").c_str());
+		SFileZip::ZipWriter allz(sourcePathTmp.assign(xmlPath).append(".allsources.dosz").c_str());
 		for (SFile* fil : files)
 			if (strncasecmp(fil->path.c_str()+fil->path.length()-4, ".zip", 4) && strncasecmp(fil->path.c_str()+fil->path.length()-5, ".dosz", 5) && strncasecmp(fil->path.c_str()+fil->path.length()-4, ".bin", 4))
-				allz.WriteFile(fil->path.c_str(), false, (Bit32u)fil->size, fil->date, fil->time, fil);
+				allz.WriteFile(fil->path.c_str(), false, fil->date, fil->time, fil);
 		allz.Finalize();
 		return 1;
 		#endif
@@ -2621,7 +3112,7 @@ int main(int argc, char *argv[])
 			if (pGameEn[0] != '<' || pGameEn[1] != '/' || pGameEn[2] != pGame[1] || pGameEn[3] != pGame[2]) { LogErr("Invalid XML near\n----------------------------\n%.*s\n----------------------------\n%.*s\n----------------------------\n", 200, pGame, 200, pGameEn); break; }
 		}
 
-		for (size_t i = files.size(); i--;) delete files[i];
+		for (size_t i = files.size(); i--;) delete files[i]; // delete backwards to delete contained files before their container
 	}
 
 	if (!noQuitConfirm) { Log("Finished. Press enter to exit\n"); fgetc(stdin); }
