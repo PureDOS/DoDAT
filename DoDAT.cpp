@@ -1422,7 +1422,7 @@ struct SFileIso : SFile
 				if (needsize)
 				{
 					Bit8u *pTrg = &buf[0] + (in_zeros > 0 ? in_zeros : t.inzeros), *pTrgEnd = pTrg + needsize;
-					Bit32u tFrame = (Bit32u)(t.start + t.inzeros / data_size), tFrameEnd = tFrame + (Bit32u)((tSize + data_size - 1) / data_size);
+					Bit32u tFrame = (Bit32u)(t.start + t.inzeros / data_size), tFrameEnd = (Bit32u)(t.start + (t.inzeros + tSize + data_size - 1) / data_size);
 					if (Bit32u tZeroOfs = (t.inzeros % data_size))
 					{
 						Bit8u *pTrgUntil = pTrg + read_size - tZeroOfs, *pTrgLimit = ZIP_MIN(pTrgUntil, pTrgEnd);
