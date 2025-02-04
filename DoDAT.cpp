@@ -431,7 +431,7 @@ struct SFile
 		FILE* f; bool failed;
 		Writer(const char* path) : f(fopen_utf8(path, "wb")), failed(f == NULL) { }
 		virtual ~Writer() { if (f) fclose(f); }
-		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false) = 0;
+		virtual void WriteFile(const char* innerpath, size_t innerpath_len, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false) = 0;
 		virtual bool Finalize(char* XmlGameInner) = 0;
 	};
 };
@@ -901,11 +901,13 @@ struct SFileZip : SFileMemory
 
 		ZipWriter(const char* path) : SFile::Writer(path), local_file_offset(0), file_count(0) { }
 
-		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false)
+		virtual void WriteFile(const char* innerpath, size_t innerpath_len, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed)
 		{
-			//if (1) { if (is_dir) return; } // force skip directory entries
-			Bit16u inpathLen = (Bit16u)strlen(innerpath), pathLen = inpathLen + ((is_dir && innerpath[inpathLen - 1] != '/' && innerpath[inpathLen - 1] != '\\') ? 1 : 0), wmethod = METHOD_STORED;
+			if (innerpath_len > 0xFFFF) { ZIP_ASSERT(false); failed = true; return; }
+			bool is_dir = (innerpath[innerpath_len-1] == '/' || innerpath[innerpath_len-1] == '\\');
+			Bit16u pathLen = (Bit16u)innerpath_len, wmethod = METHOD_STORED;
 			Bit32u wsize = (fsrc ? (Bit32u)fsrc->size : (Bit32u)0), wcrc32 = 0, extAttr = (is_dir ? 0x10 : 0), compsize = 0;
+			//if (is_dir) return; // force skip directory entries
 
 			if (is_dir || !wsize || !fsrc) { ZIP_ASSERT(!wsize); wsize = 0; }
 			else if (keep_already_compressed && fsrc->typ == SFile::T_ZIP)
@@ -972,11 +974,9 @@ struct SFileZip : SFileMemory
 			ZIP_WRITE_LE16(wbuf+28, 0);          // Extra field length
 
 			//File name (with \ changed to /)
-			for (char* pIn = (char*)innerpath, *pOut = (char*)(wbuf+30); *pIn; pIn++, pOut++)
+			for (char* pIn = (char*)innerpath, *pEnd = pIn + pathLen, *pOut = (char*)(wbuf+30); pIn != pEnd; pIn++, pOut++)
 				*pOut = (*pIn == '\\' ? '/' : *pIn);
 			//if (1) { for (char *pP = (char*)buf+30, *pE = pP + pathLen; pP != pE; pP++) if (*pP >= 'a' && *pP <= 'z') (*pP) -= 0x20; } // force upper case names
-			if (pathLen != inpathLen)
-				wbuf[30 + pathLen - 1] = '/';
 
 			failed |= !fwrite(wbuf, 30 + pathLen, 1, f);
 			if (compsize) { fseek_wrap(f, compsize, SEEK_CUR); }
@@ -1615,7 +1615,7 @@ struct SFileIso : SFile
 		// Make CHD and BIN files with raw sectors including sync head and checksums, disables support for making .ISO files
 		//#define ISOGEN_SECTOR_SIZE 2352
 
-		struct SQueuedFile { const char *wpath, *wpathX; bool is_dir; Bit16u wdate, wtime; SFile* src; };
+		struct SQueuedFile { const char *wpath, *wpathX; Bit16u wdate, wtime; SFile* src; };
 
 		// ISO record structures (recordLen is always zero padded to an even number of bytes)
 		struct PathRecord
@@ -1688,9 +1688,9 @@ struct SFileIso : SFile
 
 		~IsoWriter() { free(chdbuf); }
 
-		virtual void WriteFile(const char* innerpath, bool is_dir, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed = false)
+		virtual void WriteFile(const char* innerpath, size_t innerpath_len, Bit16u wdate, Bit16u wtime, SFile* fsrc, bool keep_already_compressed)
 		{
-			filequeue.push_back({innerpath, innerpath + strlen(innerpath), is_dir, wdate, wtime, fsrc});
+			filequeue.push_back({innerpath, innerpath + innerpath_len, wdate, wtime, fsrc});
 		}
 
 		static void ChdWriteHeader(Bit8u *rawheader, Bit64u totalSize, Bit64u metaOffset)
@@ -2217,11 +2217,9 @@ struct SFileIso : SFile
 				if (!tFrames || (tSize % tFrames)) { ZIP_ASSERT(false); continue; }
 				int tNum = atoi(trackNumber), tDataSize = (int)(tSize / tFrames), tPregap = (trackPregap ? atoi(trackPregap) : 0), tOmittedPregap = (trackOmittedPregap ? atoi(trackOmittedPregap) : 0), tInZeros = (trackInZeros ? atoi(trackInZeros) : -1), tOutZeros = (trackOutZeros ? atoi(trackOutZeros) : -1);
 				bool res = lastReader->TestOrFillTrackBuf(builtTracks, tNum, (int)tFrames, tDataSize, trackType, trackTypeX, tPregap, tOmittedPregap, tInZeros, tOutZeros, trackSha1);
-				if (!builtTracks) return res; // only test track 1
+				if (!builtTracks) { if (res) return true; break; } // only test track 1
 			}
-			if (!builtTracks) return false;
-
-			if (builtTracks->size() && (*builtFile = BuildCHDFromTracks(*builtTracks, chdRomSize, chdRomSha1)) != NULL)
+			if (builtTracks && builtTracks->size() && (*builtFile = BuildCHDFromTracks(*builtTracks, chdRomSize, chdRomSha1)) != NULL)
 			{
 				(*builtFile)->path.assign(lastReader->src.path).append("|AS_CHD");
 				break;
@@ -2742,7 +2740,13 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 
 			SFile* romFile = gameFiles[r++]; //make sure to increment r before continue
 			Bit16u zdate = 0, ztime = 0;
-			if (romDate)
+			if (useSrcDates && romFile && (romFile->date != (Bit16u)-1 || romFile->time != (Bit16u)-1))
+			{
+				// use dates in sources, ignoring the dates in the XML
+				zdate = romFile->date;
+				ztime = romFile->time;
+			}
+			else if (romDate)
 			{
 				*romDateX = '\0'; // temporarily null terminate
 				int dYear, dMon, dDay, tHour, tMin, tSec;
@@ -2754,22 +2758,11 @@ static bool BuildRom(char* pGameInner, char* gameName, char* gameNameX, const st
 				*romDateX = romDate[-1]; // undo null terminate
 			}
 
+			Bit64u size = atoi64(romSize);
+			ZIP_ASSERT(size == (romFile ? romFile->size : 0));
 			XMLInlineStringConvert(romName, romNameX);
-			*romNameX = '\0'; // temporarily null terminate
-			if (romFile)
-			{
-				ZIP_ASSERT(romFile->size == atoi64(romSize) && romFile->path.back() != '/' && romFile->path.back() != '\\' && romNameX[-1] != '/' && romNameX[-1] != '\\');
-				if (useSrcDates && (romFile->date != (Bit16u)-1 || romFile->time != (Bit16u)-1)) { zdate = romFile->date; ztime = romFile->time; } // use dates in sources, ignoring the dates in the XML
-				if (!isFix) Log("    Storing [%s] as [%s]...\n", romFile->path.c_str(), romName);
-				w->WriteFile(romName, false, zdate, ztime, (romFile->size ? romFile : NULL), isFix);
-			}
-			else if (atoi64(romSize) == 0)
-			{
-				if (!isFix) Log("    Generating %s [%s] ...\n", ((romNameX[-1] == '/' || romNameX[-1] == '\\') ? "directory" : "empty"), romName);
-				w->WriteFile(romName, (romNameX[-1] == '/' || romNameX[-1] == '\\'), zdate, ztime, NULL);
-			}
-			else { ZIP_ASSERT(false); } // should not be possible
-			*romNameX = romName[-1]; // undo null terminate
+			if (!isFix) Log("    %sing [%s] as [%.*s]...\n", (romFile ? "Stor" : "Writ"), (romFile ? romFile->path.c_str() : ((romNameX[-1] == '/' || romNameX[-1] == '\\') ? "<DIRECTORY>" : "<EMPTY FILE>")), (int)(romNameX - romName), romName);
+			w->WriteFile(romName, (size_t)(romNameX - romName), zdate, ztime, romFile, isFix);
 		}
 		if (!w->Finalize(pGameInner)) LogErr("  ERROR: Unknown error writing output file %s\n\n", outPath);
 		else if (!isFix) Log("  Done! Successfully wrote %.*s with %u files!\n\n", (int)(gameNameX - gameName), gameName, needRoms);
@@ -3034,9 +3027,9 @@ int main(int argc, char *argv[])
 			SFile& fil = *files[i];
 			const char *ext3, *ext4;
 			PathGetExt(fil.path.c_str(), fil.path.length(), ext3, ext4);
-			if      (SFileZip::UsesExtension(ext3, ext4, false))  SFileZip::IndexFiles(fil, files);
-			else if (SFileIso::UsesExtension(ext3, false))        SFileIso::IndexFiles(fil, files);
-			else if (SFileFat::UsesExtension(ext3))               SFileFat::IndexFiles(fil, files);
+			if      (SFileZip::UsesExtension(ext3, ext4, false) &&  SFileZip::IndexFiles(fil, files)) {}
+			else if (SFileIso::UsesExtension(ext3, false) &&        SFileIso::IndexFiles(fil, files)) {}
+			else if (SFileFat::UsesExtension(ext3) &&               SFileFat::IndexFiles(fil, files)) {}
 			else continue;
 			numFiles = files.size();
 		}
